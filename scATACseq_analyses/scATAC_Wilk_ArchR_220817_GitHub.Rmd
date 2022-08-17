@@ -1,7 +1,7 @@
 ---
 title: "Single-cell ATAC-seq analysis: Public COVID1-9 ATAC-seq data by Wilk et al., JEM 2020"
 author: "Jonas Schulte-Schrepping"
-date: "2022.05.30"
+date: "2022.08.17"
 output: 
   html_document: 
     code_download: yes
@@ -17,11 +17,6 @@ output:
 https://rupress.org/jem/article-pdf/218/8/e20210582/1417996/jem_20210582.pdf
 https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE174072
 https://github.com/ajwilk/COVID_scMultiome
-
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
 
 Random seed
 ```{r}
@@ -316,7 +311,7 @@ getTargetRegion <- function(motif,
 
 # -------------------------------------------------------------------------------
 
-## scATAC-seq data analysis using ArchR
+# scATAC-seq data analysis using ArchR
 
 Download data from Geo using GEOquery
 
@@ -429,6 +424,7 @@ proj@cellColData$Cell_id <- paste(proj@cellColData$SampleID, "#",
 ```
 
 Meta data was downloaded from: https://github.com/ajwilk/COVID_scMultiome/blob/main/data/scATAC/atac_cell_metadata.csv
+
 ```{r}
 meta <- read.csv("atac_cell_metadata.csv", stringsAsFactors = FALSE)
 colnames(meta)
@@ -569,13 +565,6 @@ Using this UMAP, we can visualize various attributes of our cells which are stor
 plotEmbedding(ArchRProj = proj_filt, colorBy = "cellColData", 
               name = "cell_type",
               embedding = "UMAP", verbose=FALSE)
-```
-
-```{r}
-plotEmbedding(ArchRProj = proj_filt, colorBy = "cellColData", 
-              name = "SampleID", 
-              embedding = "UMAP", 
-              verbose=FALSE)
 ```
 
 ```{r}
@@ -728,12 +717,11 @@ heatmapGS <- plotMarkerHeatmap(
 )
 ```
 
-
 ```{r,fig.height=3.75, fig.width= 4}
 ComplexHeatmap::draw(heatmapGS, heatmap_legend_side = "bot", annotation_legend_side = "bot")
 ```
 
-## Pairwise test between treatment groups
+## Pairwise test between severity groups
 
 ### Mild-specific genes
 
@@ -802,17 +790,6 @@ proj_mono <- addReproduciblePeakSet(
 )
  
 allPeaks <- getPeakSet(proj_mono)
-```
-
-```{r}
-allPeaks_annotation.df <- cbind(as.data.frame(allPeaks@seqnames),
-                                as.data.frame(allPeaks@ranges),
-                                as.data.frame(allPeaks@elementMetadata@listData))
-colnames(allPeaks_annotation.df)[1] <- "seqnames"
-
-rownames(allPeaks_annotation.df) <- paste(allPeaks_annotation.df$seqnames,
-                                          allPeaks_annotation.df$start,
-                                          allPeaks_annotation.df$end, sep="_")
 ```
 
 Add peak matrix to project:
