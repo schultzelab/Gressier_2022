@@ -1,0 +1,2530 @@
+---
+title: "Analysis of CD40 signalling in combination with IFN in myeloid cells in COVID-19"
+author: "Jonas Schulte-Schrepping"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document: 
+    theme: united
+    code_download: true
+    toc: yes
+    toc_depth: 6
+    toc_float: yes
+---
+
+# Global settings
+
+## Install packages
+
+```{r, message=FALSE}
+# library(devtools)
+# remove.packages("future")
+# remove.packages("future.apply")
+# install_version("future", version = "1.12.0", repos = "http://cran.us.r-project.org", upgrade = "never")
+# install_version("future.apply", version = "1.2.0", repos = "http://cran.us.r-project.org", upgrade = "never")
+# 
+# install.packages("dunn")
+# install.packages("dunn.test")
+# install.packages("tidydr")
+# devtools::install_version("RcisTarget", version="1.10.0",
+#                           repos=c("https://bioconductor.org/packages/3.12/bioc","http://cran.us.r-project.org"),
+#                           upgrade = "never", force = TRUE)
+# devtools::install_version("RcisTarget", version="1.38.2",
+#                           repos=c("https://bioconductor.org/packages/3.12/bioc","http://cran.us.r-project.org"),
+#                           upgrade = "never", force = TRUE)
+# devtools::install_version("AUCell", version="1.12.0",
+#                           repos=c("https://bioconductor.org/packages/3.12/bioc","http://cran.us.r-project.org"),
+#                           upgrade = "never", force = TRUE)
+```
+
+## Load packages
+
+```{r, message=FALSE}
+library(future)
+library(future.apply)
+library(Seurat)
+library(harmony)
+library(SingleR)
+library(ggplot2)
+library(biomaRt)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(foreach)
+library(tidyverse)
+library(RColorBrewer)
+library(doParallel)
+library(Matrix)
+library(circlize)
+library(ComplexHeatmap)
+library(viridis)
+library(ggrepel)
+library(reshape2)
+library(ggpubr)
+library(gtools)
+library(dunn.test)
+library(SeuratDisk)
+library(patchwork)
+library(RcisTarget)
+library(tidydr)
+library(AUCell)
+library(doRNG)
+library(GSVA)
+library(fgsea)
+```
+## Settings for parallel computing
+```{r}
+set.seed(42)
+
+cl <- makeCluster(8)
+registerDoParallel(cl)
+
+# change the current plan to access seurat parallelization
+plan("multiprocess", workers = 6)
+options(future.globals.maxSize = 20000 * 1024^2)
+```
+
+## Define colors
+```{r}
+color_clusters<-c(brewer.pal(n = 9,name = "Set1"),
+                  brewer.pal(n = 8,name = "Set2"),
+                  brewer.pal(n = 12,name = "Set3"),
+                  brewer.pal(n = 12,name = "Paired"),
+                  brewer.pal(n = 9,name = "Pastel1"),
+                  brewer.pal(n = 8,name = "Pastel2"),
+                  brewer.pal(n = 8,name = "Accent"))
+
+color_disease_stage <-  c("control_control"="#4F4D4C",
+                          "mild_early" = "#A09DC6",
+                          "mild_late" = "#5D63A1",
+                          "severe_early" = "#CD9C8B",
+                          "severe_late" = "#982326")
+
+color_group_schulte <- c("control"="#4f4d4c",
+                         "mild (3)" ="#ffb867",
+                         "moderate (4-5)" = "#5D63A1",
+                         "severe (7)" = "#982326"
+)
+
+color_group_bernardes <- c("control"="#4f4d4c",
+                 "severe" = "#982326",
+                 "mild" = "#5D63A1"
+)
+
+color_group_chua <- c("control"="#4F4D4C",
+                 "critical" = "#982326",
+                 "moderate" = "#5D63A1"
+)
+
+color_severity_arunachalam <- c("Control"="#4F4D4C",
+                 "Severe" = "#982326",
+                 "Moderate" = "#5D63A1"
+)
+
+color_grouptime_arunachalam <- c("Control_Control"="#4F4D4C",
+                                 "Moderate_early" = "#A09DC6",
+                                 "Moderate_late" = "#5D63A1",
+                                 "Severe_early" = "#CD9C8B",
+                                 "Severe_late" = "#982326"
+)
+```
+
+
+# Functions
+
+## Confusion Matrix
+
+```{r}
+confusionMatrix <- function (i = NULL, j = NULL) 
+{
+  ui <- unique(i)
+  uj <- unique(j)
+  m <- Matrix::sparseMatrix(i = match(i, ui), j = match(j, 
+    uj), x = rep(1, length(i)), dims = c(length(ui), length(uj)))
+  rownames(m) <- ui
+  colnames(m) <- uj
+  m
+}
+```
+
+## Volcano plot
+```{r}
+plotVolcano_seu <-  function(x,
+                             comparison,
+                             color_list=NULL,
+                             color_order=NULL,
+                             color_hex=NULL,
+                             label_incl = FALSE,
+                             label_select=NULL,
+                             gene_column = "Gene",
+                             p_cutoff = 0.1^200,
+                             labelnum=20){
+  
+  x <- x[x$comparison == comparison,]  
+  x$p_val_adj_cut <- ifelse(x$p_val_adj < p_cutoff, p_cutoff, x$p_val_adj)
+  x$p_val_adj_group <-  ifelse(x$p_val_adj_cut == p_cutoff, "triangle", "cycle")
+  
+    # specify labeling   
+    upDE <-  as.data.frame(x[x$avg_log2FC >0,]) 
+    FClabel_up <- upDE[order(abs(upDE$avg_log2FC), decreasing = TRUE),]
+    if(nrow(FClabel_up)>labelnum){
+      FClabel_up <- as.character(FClabel_up[c(1:labelnum),gene_column])
+    } else {
+      FClabel_up <- as.character(FClabel_up[,gene_column])}
+    plabel_up <- upDE[order(upDE$p_val_adj, decreasing = FALSE),]
+    if(nrow(plabel_up)>labelnum){
+      plabel_up <- as.character(plabel_up[c(1:labelnum),gene_column])
+    } else {
+      plabel_up <- as.character(plabel_up[,gene_column])}
+    
+    downDE <-  as.data.frame(x[x$avg_log2FC <0,]) 
+    FClabel_down <- downDE[order(abs(downDE$avg_log2FC), decreasing = TRUE),]
+    if(nrow(FClabel_down)>labelnum){
+      FClabel_down <- as.character(FClabel_down[c(1:labelnum),gene_column])
+    } else {
+      FClabel_down <- as.character(FClabel_down[,gene_column])}
+    plabel_down <- downDE[order(downDE$p_val_adj, decreasing = FALSE),]
+    if(nrow(plabel_down)>labelnum){
+      plabel_down <- as.character(plabel_down[c(1:labelnum),gene_column])
+    } else {
+      plabel_down <- as.character(plabel_down[,gene_column])}
+    
+    
+    label<- unique(c(FClabel_up, plabel_up, FClabel_down, plabel_down))
+    data <- x
+    data$label<- ifelse(data[,gene_column] %in% label == "TRUE",as.character(data[,gene_column]), "")
+    
+    if(label_incl == TRUE){
+      data$label <- NULL
+      data$label<- ifelse(data[,gene_column] %in% do.call(c, color_list) == "TRUE",as.character(data[,gene_column]), "")
+    }
+  if(!is.null(label_select)){
+    data$label<- ifelse(data[,gene_column] %in% label_select, as.character(data[,gene_column]), "")
+  }
+    if(!is.null(color_list)){
+      data$color <- "not incl"
+      for(i in 1:length(color_list)){
+        data$color <- ifelse(data$color == "not incl" & data[,gene_column] %in% color_list[[i]] == "TRUE", names(color_list)[i],
+                             data$color)   
+      }
+      data$color <- factor(data$color, levels = color_order)
+      # Volcano Plot
+      ggplot(data=na.omit(data), aes(x=avg_log2FC, y=-log10(p_val_adj_cut),shape=p_val_adj_group)) + 
+        geom_point(data=na.omit(data[data$color == "not incl",]), aes(color=color), size=1.75) +
+        geom_point(data=na.omit(data[!data$color == "not incl",]), aes(color=color), size=1.75) +
+        scale_color_manual(values=color_hex)+
+        scale_x_continuous() +
+        scale_y_continuous(limits=c(0,(-log10(p_cutoff)+10))) +
+        scale_shape_manual(values=c(19,17))+
+        xlab("log(FoldChange)") +
+        ylab("-log10(FDR)") +
+        geom_vline(xintercept = 0, colour="black")+
+        geom_text_repel(data=na.omit(data[!data$label =="",]),aes(label=label), size=2,  colour = 'black', max.overlaps = 30)+
+        theme_bw()+ 
+        ggtitle(comparison)
+    }else{
+      # Volcano Plot
+      ggplot(data=na.omit(data), aes(x=avg_log2FC, y=-log10(p_val_adj_cut),shape=p_val_adj_group)) + 
+        geom_point(size=1.75) +
+        scale_x_continuous() +
+        scale_y_continuous(limits=c(0,(-log10(p_cutoff)+10))) +
+        scale_shape_manual(values=c(19,17))+
+        xlab("log(FoldChange)") +
+        ylab("-log10(FDR)") +
+        geom_vline(xintercept = 0, colour="black")+
+        geom_text_repel(data=na.omit(data[!data$label =="",]),aes(label=label), size=2,  colour = 'black', max.overlaps = 30)+
+        guides(colour=FALSE) + 
+        theme_bw()+ ggtitle(comparison)   
+    }
+}
+
+```
+
+## Ratio Plots
+
+```{r}
+ratio_plot <- function(x,
+                       comp_x,
+                       comp_y,
+                       labelnum=20,
+                       gene_column="Gene",
+                       color_list=NULL,
+                       color_order=NULL,
+                       color_hex=NULL,
+                       label_incl = FALSE,
+                       font_size=4){
+    data_x <-  x[x$comparison == comp_x,]
+    data_y <-  x[x$comparison == comp_y,]
+    
+    data <- merge(data_x,data_y, by = gene_column, all = TRUE)
+    data <- data[,c("Gene","avg_log2FC.x","avg_log2FC.y")]
+    
+    data$avg_log2FC.x <- ifelse(is.na(data$avg_log2FC.x),0, data$avg_log2FC.x)
+    data$avg_log2FC.y <- ifelse(is.na(data$avg_log2FC.y),0, data$avg_log2FC.y)
+    
+    # specify labeling   
+    FClabel_x <- data[order(abs(data$avg_log2FC.x), decreasing = TRUE),]
+    if(nrow(FClabel_x)>labelnum){
+      FClabel_x <- as.character(FClabel_x[c(1:labelnum),gene_column])
+    } else {
+        FClabel_x <- as.character(FClabel_x[,gene_column])
+    }
+    FClabel_y <- data[order(abs(data$avg_log2FC.y), decreasing = TRUE),]
+    if(nrow(FClabel_y)>labelnum){
+      FClabel_y <- as.character(FClabel_y[c(1:labelnum),gene_column])
+    } else {
+      FClabel_y <- as.character(FClabel_y[,gene_column])
+    }
+    label<- unique(c(FClabel_x, FClabel_y))
+    data$label<- ifelse(data[,gene_column] %in% label == "TRUE",as.character(data[,gene_column]), "")
+    
+    if(label_incl == TRUE){
+      data$label <- NULL
+      data$label<- ifelse(data[,gene_column] %in% do.call(c, color_list) == "TRUE",as.character(data[,gene_column]), "")
+    }
+    
+    if(!is.null(color_list)){
+      data$color <- "not incl"
+      for(i in 1:length(color_list)){
+        data$color <- ifelse(data$color == "not incl" & data[,gene_column] %in% color_list[[i]] == "TRUE", names(color_list)[i],
+                             data$color)   
+      }
+      data$color <- factor(data$color, levels = color_order)
+      # Ratio Plot
+      ggplot(data=na.omit(data), aes(x=avg_log2FC.x, y=avg_log2FC.y)) + 
+        geom_vline(xintercept = 0, colour="black")+
+        geom_hline(yintercept = 0, colour="black")+
+        geom_vline(xintercept = c(-0.2,0.2), colour="grey")+
+        geom_hline(yintercept = c(-0.2,0.2), colour="grey")+
+        geom_abline(intercept = 0,slope = 1, color="red") +
+        geom_point(data=na.omit(data[data$color == "not incl",]), aes(color=color), size=1.75) +
+        geom_point(data=na.omit(data[!data$color == "not incl",]), aes(color=color), size=1.75) +
+        scale_color_manual(values=color_hex)+
+        scale_x_continuous() +
+        scale_y_continuous() +
+        xlab(paste("log2(FoldChange): ",comp_x,sep="")) +
+        ylab(paste("log2(FoldChange): ",comp_y,sep="")) +
+        geom_text_repel(data=na.omit(data[!data$label =="",]),aes(label=label), size=font_size,  colour = 'grey', max.overlaps = 30)+
+        theme_bw()
+    }else{
+      # Ratio Plot
+      ggplot(data=na.omit(data), aes(x=avg_log2FC.x, y=avg_log2FC.y)) + 
+        geom_vline(xintercept = 0, colour="black")+
+        geom_hline(yintercept = 0, colour="black")+
+        geom_vline(xintercept = c(-0.2,0.2), colour="grey")+
+        geom_hline(yintercept = c(-0.2,0.2), colour="grey")+
+        geom_abline(intercept = 0,slope = 1, color="red") +
+        geom_point(size=1.75) +
+        scale_x_continuous() +
+        scale_y_continuous() +
+        xlab(paste("log2(FoldChange): ",comp_x,sep="")) +
+        ylab(paste("log2(FoldChange): ",comp_y,sep="")) +
+        geom_text_repel(data=na.omit(data[!data$label =="",]),aes(label=label), size=font_size,  colour = 'grey', max.overlaps = 30)+
+        guides(colour=FALSE) + 
+        theme_bw()   
+    }
+}
+```
+
+## FeatureBoxPlot
+
+```{r}
+FeatureBoxPlot <- function(seu, by = "features", 
+                           assay, slot = "data", 
+                           exprs.function = "mean",
+                           features = NULL, 
+                           meta.include = NULL, group_by, shape_by,
+                           each.pt = "Donor", custom_fill_colors, color_by, 
+                           comparisons = my_comparisons.current, 
+                           ncol = 4, label = "p.format", select.idents = NULL, 
+                           label.x = NA, pt.size = NA, facet.face = "bold.italic") 
+{
+  DefaultAssay(seu) <- assay
+  if (is.null(group_by)){
+    group_by <- "null.group" 
+  } 
+  shapes <- NULL
+  if (!is.null(shape_by)) {
+    shapes <- c(16, 17, 15, 3, 7, 8)
+    if ((length(unique((seu[[shape_by]]))[[1]])) > 6) {
+      if (n > 18) {
+        message(paste("At most 17 shapes are currently supported", 
+                      "but", n, "are required. Setting 'shape_by' to NULL."))
+        shape_by <- NULL
+      }
+      else {
+        new <- setdiff(c(seq_len(16) - 1, 18), shapes)
+        shapes <- c(shapes, new[seq_len(n - 6)])
+      }
+    }
+  }
+  if (by == "cell.type" & length(features)>1) {
+    message("Cannot facet by two variables, faceting by features")
+    by = "features"
+  }
+  if(is.null(color_by)){
+    color_by = group_by
+  }
+  data.features = (FetchData(seu, vars = features, slot = slot))
+  if(by=="cell.type") {
+    df <- aggregate(data.features, by = list(seu@meta.data[,each.pt], seu$cell.type), FUN = exprs.function)
+    colnames(df)[1] <- each.pt
+    colnames(df)[2] <- "cell.type"   
+  }
+  else {
+    df <- aggregate(data.features, by = list(seu@meta.data[,each.pt]), FUN = exprs.function)
+    colnames(df)[1] <- each.pt
+  }
+  meta.include <- unique(c(each.pt,group_by,shape_by,color_by))
+  ei = unique(seu[[]][,meta.include])
+  df <- merge(df, ei, by = each.pt)
+  df <- cbind(df, null.group = paste("1"))
+  df[,each.pt] <- as.factor(df[,each.pt])
+  if(!is.null(select.idents)) {
+    df <- df[df$cell.type %in% select.idents,]
+  }
+  if(length(features)>1){
+    df <- melt(df, id = colnames(df)[!colnames(df) %in% features])
+  }
+  else{
+    df$variable = features
+    df$value = df[,features]
+  }
+  if(by=="cell.type"){
+    df$variable = df$cell.type
+  }
+  else {
+    df$cell.type <- NULL
+    df <- unique(df)
+  }
+  ggplot(df, aes_string(y = "value", x = group_by)) + labs(x = "Severity score at draw", y = "Average expression") + 
+    theme_bw() + theme(panel.grid.minor = element_blank(), 
+                       panel.grid.major = element_blank(), 
+                       strip.background = element_rect(fill = NA, color = NA), 
+                       strip.text = element_text(face = facet.face),
+                       axis.ticks.x = element_blank(), 
+                       axis.text = element_text(color = "black"), 
+                       axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + 
+    facet_wrap("variable", scales = "free_y", ncol = ncol) + 
+    guides(fill = FALSE) + geom_boxplot(aes_string(x = group_by), alpha = 0.25, outlier.color = NA) +
+    geom_point(size = 2, position = position_jitter(width = 0.25),
+               aes_string(x = group_by, y = "value", color = color_by, shape = shape_by)) +
+    scale_shape_manual(values = shapes) + 
+    theme(panel.grid.major = element_line(color = "grey", size = 0.25), aspect.ratio = 1,
+          text = element_text(size = 20)) +
+    scale_color_manual(values = custom_fill_colors) +
+    scale_fill_manual(values = custom_fill_colors) + 
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)), limits = c(0, NA)) + 
+    ggpubr::stat_compare_means(mapping = aes_string(group_by), comparisons = comparisons, label = label, method = "wilcox",hide.ns = TRUE) + 
+    labs(color = "COVID19 severity", shape = "death")
+} 
+```
+
+#---
+
+## Load gene set annotation
+
+```{r}
+# transpose gene names to human symbols
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+```
+
+```{r}
+hallmark_genes <- clusterProfiler::read.gmt("h.all.v7.3.symbols.gmt")
+motif_genes <- clusterProfiler::read.gmt("c3.tft.v7.3.symbols.gmt")
+```
+
+```{r}
+motifRankings_500bp <- importRankings("hg38__refseq-r80__500bp_up_and_100bp_down_tss.mc9nr.feather")
+motifRankings_10kb <- importRankings("hg38__refseq-r80__10kb_up_and_down_tss.mc9nr.feather")
+data(motifAnnotations_hgnc)
+```
+
+Load seurat PBMC reference
+
+```{r, fig.width=21, fig.height=6}
+reference <- LoadH5Seurat("pbmc_multimodal.h5seurat")
+```
+
+#-------------------------------------------------------------------------------
+
+# Load and process DE gene sets from bulk RNA-seq experiments
+
+```{r}
+DE_genes <- read.csv("murine_gene_signatures/Mouse_DEG_Signatures_EG.csv")
+DE_genes
+```
+
+```{r}
+sig_list<-as.list(DE_genes)
+
+for(i in 1:length(sig_list)){
+  x <- as.character(unique(sig_list[[i]]))[!as.character(unique(sig_list[[i]])) == ""]
+  sig_list[[i]] <- getLDS(attributes = c("mgi_symbol"), 
+                          filters = "mgi_symbol", 
+                          values = x , 
+                          mart = mouse, 
+                          attributesL = c("hgnc_symbol"), 
+                          martL = human, uniqueRows=T)[, 2]
+}
+```
+
+```{r}
+sig_list_compressed <- list("IFN_only"=sig_list$IFN_only,
+                            "Amplified"=c(sig_list$Amplified_15min,
+                                        sig_list$Amplified_30min,
+                                        sig_list$Amplified_4h),
+                            "DoubleTrigger"=c(sig_list$doubletrigger_15min,
+                                              sig_list$doubletrigger_30min,
+                                              sig_list$doubletrigger_4h),
+                            "CD40_down"=sig_list$IFN_up_CD40_down)
+```
+
+
+```{r}
+interferome_myeloid_list_top200 <- c("Cxcl10","Ifit2","Cd69","Gbp3","Gbp5","Ccl12","Mx1","Rsad2","Cmpk2","Cxcl9","Serpina3g","Oasl1","Usp18","Gbp2","Tnfsf10","Mx2","I830012O16Rik","Tgtp2","Isg20","Ifi205","Serpina3f","Mmp13","Gbp7","Fam26f","AA467197","Cd274","Nt5c3","Ifi47","Phf11a","Pou3f1","Isg15","Phf11d","Gm14446","Batf2","Igtp","Slfn1","Ccl2","Enpp4","Ifit3","Cd40","Irgm2","Ch25h","Ifi204","Irf7","Fgl2","BC094916","Il10","Daxx","Ddx58","Pydc3","Hdc","Zbp1","Fcgr4","Stat2","Pydc4","Irgm1","Ccnd2","Dhx58","Nod1","Ccl4","Aldh1b1","Setdb2","Parp12","Il15","Themis2","Scimp","Apol9b","Tor3a","Ppm1k","Sp140","Pnp","Pml","Helz2","Ifih1","Mlkl","Ccl8","Il15ra","Irg1","Trim21","Eif2ak2","Ifi44","Oasl2","Tap1","Ifit1","Ccl7","Il1rn","Ccrl2","Ddx60","Hap1","Gadd45g","Papd7","Arhgef3","Fcgr1","Gm4955","Tpst1","BC147527","P2ry14","Iigp1","Xaf1","Ifi35","Samhd1","Gm4951","Pnp2","Glipr2","Atrip","Gnb4","Mndal","H2-T22","Mov10","Stat1","Peli1","Gm5431","Lgals9","Trafd1","Oas1a","Casp4","Oas3","Upp1","P2ry13","Plekhf2","Ly6a","Parp14","March5","Dusp28","5031414D18Rik","Ube2l6","Irf1","Spsb1","Trim30d","Slamf8","Herc6","Lhx2","Oas1b","Slc28a2","Tlr3","Pcgf5","Jak2","Ifi203","Uaca","Asb13","Atp10a","H2-T10","Socs3","Sp100","Mitd1","Socs1","Sertad3","Usb1","Nampt","Rmdn3","Itpr1","Gch1","Ccl5","Ppa1","Naa25","Gcnt2","Pyhin1","Kif5c","Rgl1","Car13","Trim30b","Dennd6b","Sgcb","Pdk3","Dtx3l","Armcx6","Apobec3","Adar","Tmem171","Csrnp1","Slco3a1","Prm1","Cd86","Il18","Fbrsl1","Carhsp1","Tor1aip1","Prkx","Mnda","Epsti1","Rin2","Oas2","Flt1","Arel1","Tdrd7","Dck","Aida","B430306N03Rik","Golga3","Mxd1","Slfn5","Zyx","Gvin1","Psmb10","Gca","Klrk1","Parp10","Tmem2","Trim30a","Il27")
+
+interferome_myeloid_list_top200_human <- unique(getLDS(attributes = c("mgi_symbol"), 
+                                                       filters = "mgi_symbol", 
+                                                       values = interferome_myeloid_list_top200, 
+                                                       mart = mouse, 
+                                                       attributesL = c("hgnc_symbol"), 
+                                                       martL = human, 
+                                                       uniqueRows=T)[, 2])
+
+interferome_myeloid_intersect <- sig_list_compressed$IFN_only[sig_list_compressed$IFN_only %in% interferome_myeloid_list_top200_human[1:100]]
+
+list_compressedIFN <- list("IFN"=interferome_myeloid_intersect,
+                           "Amplified"=sig_list_compressed$Amplified,
+                           "DoubleTrigger"=sig_list_compressed$DoubleTrigger,
+                           "CD40_down"=sig_list_compressed$CD40_down)
+```
+
+# Helped and unhelped T cell signatures
+
+Table derived from https://www.sciencedirect.com/science/article/pii/S1074761317304636?via%3Dihub & GSE89665
+
+```{r}
+Tcell_sig_list <- list()
+
+Tcell_sig1 <- read.delim("COMP3_DE_Table.txt",
+                         stringsAsFactors = F)
+Tcell_sig1 <- Tcell_sig1[,!grepl("description", colnames(Tcell_sig1))]
+
+Tcell_sig_list[['Tcell_sig1_helped']] <- as.character(Tcell_sig1[Tcell_sig1$logFC < -1 & Tcell_sig1$FDR < 0.1,]$mgi)
+Tcell_sig_list[['Tcell_sig1_unhelped']] <- as.character(Tcell_sig1[Tcell_sig1$logFC > 1 & Tcell_sig1$FDR < 0.1,]$mgi)
+
+for(i in 1:length(Tcell_sig_list)){
+  x <- as.character(unique(Tcell_sig_list[[i]]))
+  print(head(x))
+  Tcell_sig_list[[i]] <- unique(getLDS(attributes = c("mgi_symbol"), 
+                          filters = "mgi_symbol", 
+                          values = x , 
+                          mart = mouse, 
+                          attributesL = c("hgnc_symbol"), 
+                          martL = human, 
+                          uniqueRows=T)[, 2])
+}
+
+lengths(Tcell_sig_list)
+```
+
+#-------------------------------------------------------------------------------
+
+# Re-analysis of scRNA-seq data published in Schulte-Schrepping et al., Cell 2020
+
+## Load seurat object
+
+Data was downloaded from: https://beta.fastgenomics.org/p/schulte-schrepping_covid19
+
+```{r}
+seurat_schulte_cohort2_pbmc <- readRDS("seurat_COVID19_PBMC_cohort2_rhapsody_jonas_FG_2020-07-23.rds")
+```
+
+```{r}
+df <- unique(seurat_schulte_cohort2_pbmc@meta.data[,c("who_per_sample", "donor","group_per_sample","disease_stage","days_after_onset")])
+table(df$group_per_sample,df$who_per_sample)
+rm(df)
+```
+
+Re-stratify COVID-19 samples by WHO ordinal scale
+
+```{r}
+seurat_schulte_cohort2_pbmc$disease_severity <- ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(3),"mild (3)", 
+                                               ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(4,5), "moderate (4-5)",
+                                                      ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(7), "severe (7)",
+                                                             ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(0), "control",
+                                                                    "error"))))
+```
+
+```{r, fig.width=7, fig.height=6}
+ DimPlot(object = seurat_schulte_cohort2_pbmc,
+              reduction = 'umap',
+              label = FALSE,
+              group.by = "disease_severity")+
+  scale_color_manual(values = color_group_schulte)
+```
+
+### Define cell groups
+
+```{r}
+seurat_schulte_cohort2_pbmc$cell_group <- as.character(ifelse(seurat_schulte_cohort2_pbmc$cluster_labels_res.0.4 %in% c("Classical Monocytes",
+                                                                                                        "HLA-DRhi CD83hi Monocytes",
+                                                                                                        "HLA-DRlo CD163hi Monocytes", 
+                                                                                                        "HLA-DRlo S100Ahi Monocytes"),
+                                                      "Classical Monocytes",
+                                                      as.character(seurat_schulte_cohort2_pbmc$cluster_labels_res.0.4)))
+cell_groups <- c("mDC","pDC",
+                 "Classical Monocytes", "Non-classical Monocytes", 
+                 "Neutrophils", "Immature Neutrophils")
+
+seurat_schulte_cohort2_pbmc$group_time <- paste(seurat_schulte_cohort2_pbmc$group_per_sample, seurat_schulte_cohort2_pbmc$disease_stage, sep="_")
+```
+
+```{r,fig,width=8, fig.height=6}
+DimPlot(object = seurat_schulte_cohort2_pbmc,
+        reduction = 'umap',
+        label = FALSE,
+        group.by = "cell_group")+
+  scale_color_manual(values = color_clusters)
+```
+
+### AUCell rankings
+
+Build cell ranking
+```{r}
+tmp1 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,1:40000])
+tmp2 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,40001:80000])
+tmp3 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,80001:ncol(seurat_schulte_cohort2_pbmc@assays$RNA@data)])
+
+tmp <- do.call(cbind,list(tmp1, tmp2,tmp3))
+
+rSum<-rowSums(tmp)
+keep<-names(rSum[rSum>10])
+tmp <- tmp[row.names(tmp) %in% keep,]
+cells_rankings <- AUCell_buildRankings(as.matrix(tmp), verbose = TRUE, nCores=2)
+```
+
+#-------------------------------------------------------------------------------
+
+# CD8+ T cell analysis
+
+## Subset analysis of T cells as annotated in Schulte-Schrepping et al., Cell 2020
+
+```{r}
+seurat_schulte_cohort2_Tcell <- subset(seurat_schulte_cohort2_pbmc, subset = cell_group %in% c("CD4+ T cells", 
+                                                                                               "CD8+ T cells",
+                                                                                               "Activated T cells", 
+                                                                                               "Prol. cells"))
+
+table(seurat_schulte_cohort2_Tcell$cell_group)
+```
+
+### Seurat v4 Reference Annotation (Azimuth)
+
+Following: <https://satijalab.org/seurat/v4.0/reference_mapping.html>
+
+Normalize query data using sc transform 
+```{r}
+seurat_schulte_cohort2_Tcell.sc <- SCTransform(seurat_schulte_cohort2_Tcell, verbose = FALSE)
+```
+
+```{r}
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = seurat_schulte_cohort2_Tcell.sc,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+```
+
+
+```{r}
+seurat_schulte_cohort2_Tcell.sc <- MapQuery(
+  anchorset = anchors,
+  query = seurat_schulte_cohort2_Tcell.sc,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca", 
+  reduction.model = "wnn.umap"
+)
+```
+
+```{r, fig.width=12, fig.height=6}
+p1 = DimPlot(seurat_schulte_cohort2_Tcell.sc, reduction = "ref.umap", group.by = "predicted.celltype.l1", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+p2 = DimPlot(seurat_schulte_cohort2_Tcell.sc, reduction = "ref.umap", group.by = "predicted.celltype.l2", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+
+p1 + p2
+```
+
+```{r}
+seurat_schulte_cohort2_Tcell$predicted.celltype.l1 <- seurat_schulte_cohort2_Tcell.sc$predicted.celltype.l1
+seurat_schulte_cohort2_Tcell$predicted.celltype.l1.score <- seurat_schulte_cohort2_Tcell.sc$predicted.celltype.l1.score
+
+seurat_schulte_cohort2_Tcell$predicted.celltype.l2 <- seurat_schulte_cohort2_Tcell.sc$predicted.celltype.l2
+seurat_schulte_cohort2_Tcell$predicted.celltype.l2.score <- seurat_schulte_cohort2_Tcell.sc$predicted.celltype.l2.score
+```
+
+### Subset Seurat-defined T cells
+
+```{r}
+seurat_schulte_cohort2_Tcell_clean <- subset(seurat_schulte_cohort2_Tcell, subset = predicted.celltype.l2 %in% c("CD4 Naive", "CD4 TCM",  
+                                                                                                                 "CD4 TEM",  "CD4 CTL",  "CD4 Proliferating", 
+                                                                                                                 "CD8 Naive", "CD8 TCM", 
+                                                                                                                 "CD8 TEM", "CD8 Proliferating", 
+                                                                                                                 "Treg", "gdT", "MAIT", "dnT"))
+seurat_schulte_cohort2_Tcell_clean
+```
+
+### Define variable genes
+```{r, fig.width= 12}
+seurat_schulte_cohort2_Tcell_clean <- FindVariableFeatures(object = seurat_schulte_cohort2_Tcell_clean, 
+                                   assay="RNA",
+                                   selection.method = 'vst', 
+                                   nfeatures = 2000
+                                   )
+```
+
+### Scale data
+
+```{r}
+seurat_schulte_cohort2_Tcell_clean <- ScaleData(object = seurat_schulte_cohort2_Tcell_clean,
+                               vars.to.regress = c("nCount_RNA"))
+```
+
+### PCA
+```{r, fig.height=12,fig.width=12}
+seurat_schulte_cohort2_Tcell_clean <- RunPCA(object = seurat_schulte_cohort2_Tcell_clean, features = VariableFeatures(object = seurat_schulte_cohort2_Tcell_clean), verbose = FALSE)
+```
+
+### UMAP
+
+```{r}
+seurat_schulte_cohort2_Tcell_clean <- RunUMAP(seurat_schulte_cohort2_Tcell_clean, reduction = "pca", dims = 1:10, seed.use = 42)
+```
+
+```{r,fig.width=7, fig.height=6}
+ DimPlot(object = seurat_schulte_cohort2_Tcell_clean,
+              reduction = 'umap',
+              label = FALSE,
+              group.by = "disease_severity")+
+  scale_color_manual(values = color_group_schulte)
+```
+
+### Clustering
+
+```{r, fig.width=16,fig.height=20}
+seurat_schulte_cohort2_Tcell_clean <- FindNeighbors(object = seurat_schulte_cohort2_Tcell_clean, dims = 1:10, reduction="pca", force.recalc = TRUE)
+```
+
+```{r}
+seurat_schulte_cohort2_Tcell_clean <- FindClusters(object = seurat_schulte_cohort2_Tcell_clean, resolution = 0.2, algorithm = 1)
+```
+
+```{r, fig.width= 6, fig.height= 6}
+DimPlot(object = seurat_schulte_cohort2_Tcell_clean,
+        reduction = 'umap',
+        group.by="RNA_snn_res.0.2",
+        label = TRUE) + scale_color_manual(values=color_clusters) + NoLegend()
+```
+
+### Identify cluster marker genes
+
+```{r}
+Idents(seurat_schulte_cohort2_Tcell_clean) <- "RNA_snn_res.0.2"
+Tcell_clean_cluster.markers.wilcox_res.0.2 <- FindAllMarkers(object = seurat_schulte_cohort2_Tcell_clean,
+                                                 only.pos = TRUE,
+                                                 min.pct = 0.2,
+                                                 logfc.threshold = 0.2,
+                                                 min.diff.pct = 0.1,
+                                                 test.use = "wilcox"
+)
+```
+
+##### Dotplot
+
+```{r, fig.width=8, fig.height=12}
+top <- Tcell_clean_cluster.markers.wilcox_res.0.2 %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+
+p <- DotPlot(seurat_schulte_cohort2_Tcell_clean,
+        group.by = "RNA_snn_res.0.2",
+        features = unique(c("CD3E","IL7R","CD8A","CD4","CD69","IL2RA",unique(top$gene))))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+#---
+
+## Subset analysis of CD8 + T cells (clustering-based)
+
+```{r}
+seurat_schulte_cohort2_CD8 <- subset(seurat_schulte_cohort2_Tcell_clean, subset = RNA_snn_res.0.2 == 1)
+seurat_schulte_cohort2_CD8
+```
+
+### Define variable genes
+```{r, fig.width= 12}
+seurat_schulte_cohort2_CD8 <- FindVariableFeatures(object = seurat_schulte_cohort2_CD8, 
+                                   assay="RNA",
+                                   selection.method = 'vst', 
+                                   nfeatures = 2000
+                                   )
+```
+
+```{r, fig.width=6, fig.height=3}
+# Identify the 10 most highly variable genes
+top50 <- head(VariableFeatures(seurat_schulte_cohort2_CD8), 50)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(seurat_schulte_cohort2_CD8)
+plot2 <- LabelPoints(plot = plot1, points = top50, repel = TRUE)
+
+plot2
+```
+
+## Filter variable features for RPS/RPS/HB/MT
+
+```{r}
+seurat_schulte_cohort2_CD8_filtVarFeatures <- seurat_schulte_cohort2_CD8
+
+VariableFeatures_Tcell <- VariableFeatures(object = seurat_schulte_cohort2_CD8_filtVarFeatures)
+VariableFeatures(object = seurat_schulte_cohort2_CD8_filtVarFeatures) <- VariableFeatures_Tcell[!grepl("^RPL|^RPS|^MT-|^HBB|^HBA1|^HBA2",VariableFeatures_Tcell)]
+```
+
+### Scale data
+
+```{r}
+seurat_schulte_cohort2_CD8_filtVarFeatures <- ScaleData(object = seurat_schulte_cohort2_CD8_filtVarFeatures,
+                               vars.to.regress = c("nCount_RNA"))
+```
+
+### PCA
+```{r, fig.height=12,fig.width=12}
+seurat_schulte_cohort2_CD8_filtVarFeatures <- RunPCA(object = seurat_schulte_cohort2_CD8_filtVarFeatures, 
+                                             features = VariableFeatures(object = seurat_schulte_cohort2_CD8_filtVarFeatures), 
+                                             verbose = FALSE)
+```
+
+### UMAP
+
+```{r}
+seurat_schulte_cohort2_CD8_filtVarFeatures <- RunUMAP(seurat_schulte_cohort2_CD8_filtVarFeatures, 
+                                              reduction = "pca", 
+                                              dims = 1:10, 
+                                              seed.use = 42)
+```
+
+
+```{r, fig.width=12, fig.height=4}
+p <- DimPlot(object = seurat_schulte_cohort2_CD8_filtVarFeatures, 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "disease_severity",split.by = "disease_severity",ncol=5,pt.size = 0.5
+        ) +
+    scale_color_manual(values = color_group_schulte)+ NoLegend()
+
+p
+```
+
+### Clustering
+
+```{r, fig.width=16,fig.height=20}
+seurat_schulte_cohort2_CD8_filtVarFeatures <- FindNeighbors(object = seurat_schulte_cohort2_CD8_filtVarFeatures, dims = 1:10, reduction="pca", force.recalc = TRUE)
+```
+
+```{r}
+seurat_schulte_cohort2_CD8_filtVarFeatures <- FindClusters(object = seurat_schulte_cohort2_CD8_filtVarFeatures, resolution = 0.4, algorithm = 1)
+```
+
+
+```{r, fig.width=6, fig.height=6}
+DimPlot(object = seurat_schulte_cohort2_CD8_filtVarFeatures,
+        reduction = 'umap',
+        group.by="RNA_snn_res.0.4",
+        label = TRUE) + scale_color_manual(values=color_clusters) + NoLegend()
+```
+
+### Identify cluster marker genes
+
+```{r}
+Idents(seurat_schulte_cohort2_CD8_filtVarFeatures) <- "RNA_snn_res.0.4"
+CD8_filtVarFeatures_cluster.markers.wilcox_res.0.4 <- FindAllMarkers(object = seurat_schulte_cohort2_CD8_filtVarFeatures,
+                                                 only.pos = TRUE,
+                                                 min.pct = 0.2,
+                                                 logfc.threshold = 0.2,
+                                                 min.diff.pct = 0.1,
+                                                 test.use = "wilcox"
+)
+```
+
+#### Dotplot
+
+```{r, fig.width=12, fig.height=4}
+top <- CD8_filtVarFeatures_cluster.markers.wilcox_res.0.4  %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+
+p <- DotPlot(seurat_schulte_cohort2_CD8_filtVarFeatures,
+        group.by = "RNA_snn_res.0.4",
+        features = c("CD69",unique(top$gene)))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+p
+```
+
+## Cluster naming 
+
+Literature: 
+
+*Cx3Cr1* https://www.cell.com/immunity/pdfExtended/S1074-7613(16)30429-0, https://www.nature.com/articles/ncomms9306 " Simi-larly, CX3CR1+Tmem cells exhibit robust cytotoxicity, whileCX3CR1–Tmem cells are largely non-cytotoxic and possessgreater proliferative capacity (Bo ̈ttcher et al., 2015)."
+*GZMB/GZMK* https://pubmed.ncbi.nlm.nih.gov/16106370/ "Only few CD8+ T cells expressed both GrB and GrK. GrA was found to be co-expressed in all GrB- and GrK-expressing T cells. Our findings suggest that granzyme expression during the differentiation process of memory CD8+ T cells might be as follows: GrA+/GrB-/GrK+ --> GrA+/GrB+/GrK+ --> GrA+/GrB+/GrK-."
+*DUSP1/2*: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6600418/ "More recently,  DUSP2 was shown to be a negative regulator of STAT3 signaling during thecommitment of cells to the Th17 lineage in a T cell transfer model of colitis [47]. Here, the expression ofDUSP1, DUSP2 and DUSP4 was upregulated in T cells upon stimulation with anti-CD3 and anti-CD28."
+*ZEB2*: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4647262/ "Here, we find that ZEB2 expression is up-regulated by activated T cells, specifically in the KLRG1hi effector CD8+ T cell subset. Loss of ZEB2 expression results in a significant loss of antigen-specific CD8+ T cells after primary and secondary infection with a severe impairment in the generation of the KLRG1hi effector memory cell population.[...] Collectively, we place ZEB2 in a larger transcriptional network that is responsible for the balance between terminal differentiation and formation of memory CD8+ T cells." & https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4647261/ "We find that, at high concentrations, T-bet induced expression of Zeb2 mRNA, which then triggered CTLs to adopt terminally differentiated states."
+
+```{r}
+cluster_naming_res.0.4 <- data.frame(cluster = c(0,1,2,3,4,5,6),
+                                     type = c("4: Terminally differentiated TEM (CD62L-/CX3CR1+/GZMB+)", #0
+                                              "3: Activated TEM (CD69+/GZMK+/DUSP+)", #1
+                                              "5: ISG + terminally differentiated TEM (ISG+/CD62L-/CX3CR1+/GZMB+)", #2
+                                              "2: Terminally Differentiating CTL (ZEB2+)", #3
+                                              "0: Naive T cells (CD62L+)", #4
+                                              "6: gd Tcells (TRDC+)", #5
+                                              "1: CTL (CD69+/KLRB1+/GZMK+)" #6
+                                     ),
+                                     order = c("4",
+                                              "3",
+                                              "5",
+                                              "2",
+                                              "0",
+                                              "6",
+                                              "1"
+                                     ),
+                                     stringsAsFactors = FALSE)
+
+
+idx <- match(seurat_schulte_cohort2_CD8_filtVarFeatures$RNA_snn_res.0.4, cluster_naming_res.0.4$cluster)
+sum(is.na(idx))
+
+seurat_schulte_cohort2_CD8_filtVarFeatures[['cluster_labels_res.0.4']] <- factor(cluster_naming_res.0.4$type[idx], 
+                                                                         levels=c("0: Naive T cells (CD62L+)", #4
+                                                                                  "1: CTL (CD69+/KLRB1+/GZMK+)", #6
+                                                                                  "2: Terminally Differentiating CTL (ZEB2+)", #3
+                                                                                  "3: Activated TEM (CD69+/GZMK+/DUSP+)", #1
+                                                                                  "4: Terminally differentiated TEM (CD62L-/CX3CR1+/GZMB+)", #0
+                                                                                  "5: ISG + terminally differentiated TEM (ISG+/CD62L-/CX3CR1+/GZMB+)", #2
+                                                                                  "6: gd Tcells (TRDC+)" #5
+                                                                                  ))
+
+seurat_schulte_cohort2_CD8_filtVarFeatures[['cluster_labels_order']] <- cluster_naming_res.0.4$order[idx]
+```
+
+```{r, fig.width=6, fig.height=6}
+T_order_colors <- c("0"="#4d5cab",
+                    "1"="#8559a4",
+                    "2"="#ffa500",
+                    "3"="#349721",
+                    "4"="#1a4b10",
+                    "5"="#ff4040",
+                    "6"="#a9a5ad"
+)
+
+p <- DimPlot(object = seurat_schulte_cohort2_CD8_filtVarFeatures,
+        reduction = 'umap',
+        group.by="cluster_labels_order",
+        label = T) + scale_color_manual(values=T_order_colors)+NoLegend()
+
+p
+```
+
+```{r, fig.width=12, fig.height=6}
+T_cluster_colors <- c("0: Naive T cells (CD62L+)"="#4d5cab",
+                    "1: CTL (CD69+/KLRB1+/GZMK+)"="#8559a4",
+                    "2: Terminally Differentiating CTL (ZEB2+)"="#ffa500",
+                    "3: Activated TEM (CD69+/GZMK+/DUSP+)"="#349721",
+                    "4: Terminally differentiated TEM (CD62L-/CX3CR1+/GZMB+)"="#1a4b10",
+                    "5: ISG + terminally differentiated TEM (ISG+/CD62L-/CX3CR1+/GZMB+)"="#ff4040",
+                    "6: gd Tcells (TRDC+)"="#a9a5ad"
+)
+
+p <- DimPlot(object = seurat_schulte_cohort2_CD8_filtVarFeatures,
+        reduction = 'umap',
+        group.by="cluster_labels_res.0.4",
+        label = F) + scale_color_manual(values=T_cluster_colors)
+
+p
+```
+
+
+```{r, fig.width=7, fig.height=4}
+# quantify cells of each sample per cluster
+cells_cluster <- confusionMatrix(paste0(seurat_schulte_cohort2_CD8_filtVarFeatures$cluster_labels_res.0.4),
+                                 paste0(seurat_schulte_cohort2_CD8_filtVarFeatures$disease_severity))
+
+
+cells_cluster <- cells_cluster[,order(factor(colnames(cells_cluster),levels=c("control",
+                                                                              "mild (3)",
+                                                                              "moderate (4-5)",
+                                                                              "severe (7)")))]
+
+cells_cluster <- cells_cluster[order(factor(rownames(cells_cluster),levels=c("0: Naive T cells (CD62L+)", #4
+                                                                             "1: CTL (CD69+/KLRB1+/GZMK+)", #6
+                                                                             "2: Terminally Differentiating CTL (ZEB2+)", #3
+                                                                             "3: Activated TEM (CD69+/GZMK+/DUSP+)", #1
+                                                                             "4: Terminally differentiated TEM (CD62L-/CX3CR1+/GZMB+)", #0
+                                                                             "5: ISG + terminally differentiated TEM (ISG+/CD62L-/CX3CR1+/GZMB+)" #2
+))),]
+
+# normalize to 1000 cells per sample
+tmp <- round(t(t(cells_cluster)/colSums(cells_cluster))*1000,3)
+
+# calculate percentage of cells from sample per cluster
+scaled_cM <- round((tmp / Matrix::rowSums(tmp))*100,2)
+
+pheatmap::pheatmap(
+  mat = as.matrix(scaled_cM),
+  cluster_cols = F,
+  border_color = "black",display_numbers = TRUE,
+  cluster_rows = F
+)
+```
+
+#### Dotplot of selected key genes
+```{r, fig.width=5, fig.height=10}
+p <- DotPlot(subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset = cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE),
+        group.by = "cluster_labels_res.0.4",
+        features = c("SELL","IL7R","CD69","FOSL2","KLRG1","KLRB1","GZMK","GZMB","ZEB2","JUNB","JUND","CXCR4","DUSP1","DUSP2","CX3CR1","ISG15","IFIT3"),col.max = 1, col.min = -1, dot.scale = 8)+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+## AUCell Enrichment analysis with cluster resoluition 
+
+```{r}
+# Calculate AUC scores
+cells_AUC_Tcell_help <- AUCell_calcAUC(Tcell_sig_list, 
+                                       cells_rankings, 
+                                       aucMaxRank = ceiling(0.03 * nrow(cells_rankings)), 
+                                       normAUC = T)
+```
+
+#### Plot violinplots
+
+```{r, fig.width=10, fig.height=4}
+tmp <- getAUC(cells_AUC_Tcell_help)
+tmp <- as.data.frame(t(tmp))
+df <- data.frame(row.names = row.names(seurat_schulte_cohort2_CD8_filtVarFeatures@meta.data), 
+                 cluster = seurat_schulte_cohort2_CD8_filtVarFeatures$cluster_labels_order,
+                 stringsAsFactors = F)
+
+#Merge two annot columns
+df <- as.data.frame(merge(df, tmp, by = 0))
+
+df <- df[df$Row.names %in% Cells(seurat_schulte_cohort2_CD8),]
+
+df.melt <- reshape2::melt(df)
+
+#Calculate the mean
+gg <- ggplot(df.melt, aes(y = value, 
+                     x = cluster, 
+                     group = cluster,
+                     color=cluster)) +
+  geom_violin(scale = "area", trim = T, adjust = 3, draw_quantiles = c(0.25, 0.5, 0.75), fill = "white") +
+  ylab("AUC score") + xlab("cluster") +
+    scale_color_manual(values = T_order_colors)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line.x = element_line(color="black", size = .3),
+        axis.line.y = element_line(color="black", size = .3))+ facet_wrap(. ~ variable, scales="free", ncol=2)+
+  theme(
+    strip.background = element_rect(
+      color="black", fill="white", size=0, linetype="solid"
+    )
+  )
+
+gg
+```
+
+### Statistics
+
+```{r}
+tmp <- getAUC(cells_AUC_Tcell_help)
+tmp <- as.data.frame(t(tmp))
+df <- data.frame(row.names = row.names(seurat_schulte_cohort2_CD8_filtVarFeatures@meta.data), 
+                 cluster = as.character(seurat_schulte_cohort2_CD8_filtVarFeatures$cluster_labels_res.0.4), 
+                 stringsAsFactors = F)
+df <- as.data.frame(merge(df, tmp, by = 0))
+rownames(df)<-df$Row.names
+df$cell_id <- df$Row.names
+df$Row.names <- NULL
+df_melt <- reshape2::melt(df)
+```
+
+One-way ANOVA on ranks is a non-parametric method for testing whether samples originate from the same distribution. It is used for comparing two or more independent samples of equal or different sample sizes. It extends the Mann–Whitney U test, which is used for comparing only two groups. The parametric equivalent of the Kruskal–Wallis test is the one-way analysis of variance (ANOVA). 
+
+```{r}
+res.KW = matrix(0,length(unique(df_melt$variable)),2)
+
+for (i in 1:length(unique(df_melt$variable))){
+  x <- as.character(unique(df_melt$variable)[i])
+  print(x)
+  tmp <- df_melt[df_melt$variable==x,]
+  res.KW[i,1] <- x
+  print(kruskal.test(data = tmp, value ~ cluster))
+  res.KW[i,2] <-  kruskal.test(data = tmp, value ~ cluster)$p.value
+}
+
+
+res.KW <- as.tibble(res.KW)
+colnames(res.KW) <- c("geneset", "p.val")
+res.KW <- res.KW %>% mutate(KWadj = p.adjust(p.val, method = "fdr")) %>% mutate(labelKWadj = paste0("KW* = ", as.numeric(round(as.numeric(KWadj),4))))
+
+res.KW
+```
+
+##### Dunns Test
+
+Once your initial ANOVA has found a significant difference in three or more means, Dunn’s Test can be used to pinpoint which specific means are significant from the others. Dunn’s Multiple Comparison Test is a post hoc (i.e. it’s run after an ANOVA) non parametric test (a “distribution free” test that doesn’t assume your data comes from a particular distribution). 
+
+```{r}
+n_tests <- dim(combinations(levels(df_melt$variable),n=length(levels(df_melt$variable)),r=2))[1]
+dunns = matrix(0,length(unique(df_melt$variable))*n_tests,3)
+
+for (i in unique(df_melt$variable)){
+  tmp <- df_melt[df_melt$variable==i,]
+  dunntests <- dunn.test::dunn.test(x = tmp$value, g = tmp$cluster, kw = TRUE, method = "bh")
+  if(i == unique(df_melt$variable)[1]){
+    dunns <- cbind(i,dunntests$comparisons, dunntests$P, dunntests$P.adjusted)
+  }else{
+    dunns <- rbind(dunns,cbind(i,dunntests$comparisons, dunntests$P, dunntests$P.adjusted))
+  }
+}
+
+colnames(dunns) <- c("geneset", "Comparison","Dunn_pval","Dunns_adj") 
+dunns <- as.tibble(dunns)
+res.KW %>% left_join(dunns) %>%
+  mutate(labelDunns_adj = ifelse(as.numeric(KWadj) >= 0.05,"ns",
+                                 ifelse(as.numeric(Dunns_adj) <= 10^-4,"****",
+                                        ifelse(as.numeric(Dunns_adj) < 10^-3, "***",
+                                               ifelse(as.numeric(Dunns_adj) < 10^-2, "**",
+                                                      ifelse(as.numeric(Dunns_adj) < 0.05, "*","ns")))))) -> kw_dunns
+kw_dunns
+```
+
+#-------------------------------------------------------------------------------
+
+## Filter gd T cells from plots
+
+```{r}
+table(subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset= cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE)$disease_severity)
+```
+## UMAP of CD8+ T cells across disease severity (Figure 6A)
+```{r, fig.width=12, fig.height=4}
+p <- DimPlot(object = subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset= cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE), 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "disease_severity",split.by = "disease_severity",ncol=5,pt.size = 0.5
+        ) +
+    scale_color_manual(values = color_group_schulte)+ NoLegend()
+
+p
+```
+## UMAP of CD8+ T cell cluster (Figure 6C)
+```{r, fig.width=6, fig.height=6}
+T_order_colors <- c("0"="#4d5cab",
+                    "1"="#8559a4",
+                    "2"="#ffa500",
+                    "3"="#349721",
+                    "4"="#1a4b10",
+                    "5"="#ff4040",
+                    "6"="#a9a5ad"
+)
+
+p <- DimPlot(object = subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset= cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE),
+        reduction = 'umap',
+        group.by="cluster_labels_order",
+        label = T) + scale_color_manual(values=T_order_colors)+NoLegend()
+
+p
+```
+
+## Cluster Occupancy Heatmap (Figure 6C)
+
+```{r, fig.width=3, fig.height=4}
+tmp <- subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset = cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE)
+
+# quantify cells of each sample per cluster
+cells_cluster <- confusionMatrix(paste0(tmp$cluster_labels_order),
+                                 paste0(tmp$disease_severity))
+
+
+cells_cluster <- cells_cluster[,order(factor(colnames(cells_cluster),levels=c("control",
+                                                                              "mild (3)",
+                                                                              "moderate (4-5)",
+                                                                              "severe (7)")))]
+
+cells_cluster <- cells_cluster[order(factor(rownames(cells_cluster),levels=c(0,1,2,3,4,5))),]
+
+# normalize to 1000 cells per sample
+tmp <- round(t(t(cells_cluster)/colSums(cells_cluster))*1000,3)
+
+# calculate percentage of cells from sample per cluster
+scaled_cM <- round((tmp / Matrix::rowSums(tmp))*100,2)
+
+pheatmap::pheatmap(
+  mat = as.matrix(scaled_cM),
+  cluster_cols = F,
+  border_color = "black",display_numbers = TRUE,
+  cluster_rows = F
+)
+```
+
+## DotPlot of selected key genes on CD8 T cell clusters (Figure 6D)
+```{r, fig.width=5, fig.height=7}
+p <- DotPlot(subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset = cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE),
+        group.by = "cluster_labels_order",
+        features = c("SELL","IL7R","CD69","FOSL2","KLRG1","KLRB1","GZMK","GZMB","ZEB2","JUNB","JUND","CXCR4","DUSP1","DUSP2","CX3CR1","ISG15","IFIT3"),col.max = 1, col.min = -1, dot.scale = 8)+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+## Identify cluster-specific marker genes (Suppl. Table 7)
+
+```{r}
+Idents(seurat_schulte_cohort2_CD8_filtVarFeatures) <- "cluster_labels_order"
+CD8_clustermarkers <- FindAllMarkers(object = subset(seurat_schulte_cohort2_CD8_filtVarFeatures, 
+                                                     subset = cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE),
+                                                 only.pos = TRUE,
+                                                 min.pct = 0.2,
+                                                 logfc.threshold = 0.2,
+                                                 min.diff.pct = 0.1,
+                                                 test.use = "wilcox"
+)
+
+write_excel_csv2(CD8_clustermarkers, paste("analysis_output/DEG_CD8Tcell_ClusterMarkers_",Sys.Date(),".csv",sep=""))
+```
+
+#### Dotplot
+
+```{r, fig.width=12, fig.height=4}
+top <- CD8_filtVarFeatures_cluster.markers.wilcox_res.0.4  %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+
+p <- DotPlot(seurat_schulte_cohort2_CD8_filtVarFeatures,
+        group.by = "RNA_snn_res.0.4",
+        features = c("CD69",unique(top$gene)))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+p
+```
+
+#----
+
+# Sample-specific GSVA (Figure 6B)
+
+```{r}
+expr_mtx <- AggregateExpression(
+  object= subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset = cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE),
+  assays = "RNA",
+  features = NULL,
+  return.seurat = FALSE,
+  group.by = "sampleID",
+  slot = "data"
+)
+expr_mtx <- as.matrix(expr_mtx$RNA)
+
+rSum<-rowSums(expr_mtx)
+keep<-names(rSum[rSum>50])
+expr_mtx <- expr_mtx[row.names(expr_mtx) %in% keep,]
+str(expr_mtx)
+
+gsva.res <- as.data.frame(t(gsva(expr = expr_mtx, 
+                gset.idx.list = Tcell_sig_list, 
+                method = "gsva",
+                verbose=FALSE)))
+gsva.res$sampleID <- rownames(gsva.res)
+
+
+gsva.res.melt <- reshape2::melt(gsva.res)
+```
+
+```{r}
+meta <- unique(seurat_schulte_cohort2_CD8_filtVarFeatures@meta.data[,c("sampleID","disease_severity","disease_stage", "group_time", "group_per_sample")])
+idx <- match(gsva.res.melt$sampleID, meta$sampleID)
+gsva.res.melt$disease_severity <- meta$disease_severity[idx]
+gsva.res.melt$disease_stage <- meta$disease_stage[idx]
+gsva.res.melt$group_time <- meta$group_time[idx]
+gsva.res.melt$group_per_sample <- factor(meta$group_per_sample[idx], levels=c("control","mild","severe"))
+```
+
+
+```{r, fig.width=12,fig.height=4}
+p <- ggplot(gsva.res.melt, aes(y =value, x = disease_severity)) +
+  geom_boxplot(outlier.colour = NA) +
+  geom_point(size = 2, position = position_jitter(width = 0.25),
+             aes(x = disease_severity, y = value, color = disease_severity, shape = disease_stage)) +
+  facet_wrap(vars(variable), scales = "free_y", ncol = 4)+
+  ggpubr::stat_compare_means(mapping = aes_string(group_by), comparisons = list(c("control", "mild (3)"),
+                                                                                c("control", "moderate (4-5)"),
+                                                                                c("control", "severe (7)"),
+                                                                                c("mild (3)", "moderate (4-5)"),
+                                                                                c("mild (3)", "severe (7)"),
+                                                                                c("moderate (4-5)", "severe (7)")), 
+                                                                                label = "p.format", method = "wilcox",hide.ns = TRUE) + 
+  labs(color = "COVID19 severity", shape = "stage")+
+  scale_color_manual(values=color_group_schulte)+
+  theme_classic()
+
+p
+```
+
+#-------------------------------------------------------------------------------
+
+# Monocyte and DC analysis
+
+## Subset cells based on original annotation
+
+```{r}
+seurat_schulte_cohort2_Myeloid <- subset(seurat_schulte_cohort2_pbmc, subset = cell_group %in% c("Classical Monocytes", 
+                                                                                                 "Non-classical Monocytes",
+                                                                                                 "mDC", 
+                                                                                                 "pDC"))
+```
+
+### Seurat v4 Reference Annotation (Azimuth)
+
+Following: <https://satijalab.org/seurat/v4.0/reference_mapping.html>
+
+Normalize query data using sc transform 
+```{r}
+seurat_schulte_cohort2_Myeloid.sc <- SCTransform(seurat_schulte_cohort2_Myeloid, verbose = FALSE)
+```
+
+```{r}
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = seurat_schulte_cohort2_Myeloid.sc,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+```
+
+
+```{r}
+seurat_schulte_cohort2_Myeloid.sc <- MapQuery(
+  anchorset = anchors,
+  query = seurat_schulte_cohort2_Myeloid.sc,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca", 
+  reduction.model = "wnn.umap"
+)
+```
+
+```{r, fig.width=12, fig.height=6}
+p1 = DimPlot(seurat_schulte_cohort2_Myeloid.sc, reduction = "ref.umap", group.by = "predicted.celltype.l1", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+p2 = DimPlot(seurat_schulte_cohort2_Myeloid.sc, reduction = "ref.umap", group.by = "predicted.celltype.l2", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+
+p1 + p2
+```
+
+```{r}
+seurat_schulte_cohort2_Myeloid$predicted.celltype.l1 <- seurat_schulte_cohort2_Myeloid.sc$predicted.celltype.l1
+seurat_schulte_cohort2_Myeloid$predicted.celltype.l1.score <- seurat_schulte_cohort2_Myeloid.sc$predicted.celltype.l1.score
+
+seurat_schulte_cohort2_Myeloid$predicted.celltype.l2 <- seurat_schulte_cohort2_Myeloid.sc$predicted.celltype.l2
+seurat_schulte_cohort2_Myeloid$predicted.celltype.l2.score <- seurat_schulte_cohort2_Myeloid.sc$predicted.celltype.l2.score
+```
+
+## Subset Seurat-defined Monocytes and DC
+
+```{r}
+seurat_schulte_cohort2_Myeloid_clean <- subset(seurat_schulte_cohort2_Myeloid, subset = predicted.celltype.l2 %in% c("CD14 Mono", 
+                                                                                                                     "CD16 Mono", 
+                                                                                                                     "pDC",
+                                                                                                                     "cDC1",
+                                                                                                                     "cDC2",
+                                                                                                                     "ASDC"))
+```
+
+### Define variable genes
+```{r, fig.width= 12}
+seurat_schulte_cohort2_Myeloid_clean <- FindVariableFeatures(object = seurat_schulte_cohort2_Myeloid_clean, 
+                                   assay="RNA",
+                                   selection.method = 'vst', 
+                                   nfeatures = 2000
+                                   )
+```
+
+### Scale data
+
+```{r}
+seurat_schulte_cohort2_Myeloid_clean <- ScaleData(object = seurat_schulte_cohort2_Myeloid_clean,
+                               vars.to.regress = c("nCount_RNA"))
+```
+
+### PCA
+```{r, fig.height=12,fig.width=12}
+seurat_schulte_cohort2_Myeloid_clean <- RunPCA(object = seurat_schulte_cohort2_Myeloid_clean, 
+                                       features = VariableFeatures(object = seurat_schulte_cohort2_Myeloid_clean), 
+                                       verbose = FALSE)
+```
+
+### UMAP
+
+```{r}
+seurat_schulte_cohort2_Myeloid_clean <- RunUMAP(seurat_schulte_cohort2_Myeloid_clean, reduction = "pca", dims = 1:10, seed.use = 42)
+```
+
+```{r, fig.width=8, fig.height=6}
+DimPlot(object = seurat_schulte_cohort2_Myeloid_clean, 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "disease_severity"
+        )
+```
+
+### Clustering
+
+```{r, fig.width=16,fig.height=20}
+seurat_schulte_cohort2_Myeloid_clean <- FindNeighbors(object = seurat_schulte_cohort2_Myeloid_clean, dims = 1:10, reduction="pca", force.recalc = TRUE)
+```
+
+```{r}
+seurat_schulte_cohort2_Myeloid_clean <- FindClusters(object = seurat_schulte_cohort2_Myeloid_clean, resolution = 0.2, algorithm = 1)
+```
+
+```{r, fig.width= 6, fig.height= 6}
+DimPlot(object = seurat_schulte_cohort2_Myeloid_clean,
+        reduction = 'umap',
+        group.by="RNA_snn_res.0.2",
+        label = TRUE) + scale_color_manual(values=color_clusters) + NoLegend()
+```
+
+### Identify cluster marker genes
+
+```{r}
+Idents(seurat_schulte_cohort2_Myeloid_clean) <- "RNA_snn_res.0.2"
+Myeloid_clean_cluster.markers.wilcox_res.0.2 <- FindAllMarkers(object = seurat_schulte_cohort2_Myeloid_clean,
+                                                 only.pos = TRUE,
+                                                 min.pct = 0.2,
+                                                 logfc.threshold = 0.2,
+                                                 min.diff.pct = 0.1,
+                                                 test.use = "wilcox"
+)
+```
+
+##### Dotplot
+
+```{r, fig.width=8, fig.height=12}
+top <- Myeloid_clean_cluster.markers.wilcox_res.0.2 %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+
+p <- DotPlot(seurat_schulte_cohort2_Myeloid_clean,
+        group.by = "RNA_snn_res.0.2",
+        features =  unique(top$gene))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+#---
+
+## Subset analysis of Monocytes (clustering-based)
+
+### Cluster naming
+
+```{r}
+cluster_naming_res.0.2 <- data.frame(cluster = c(0,1,2,3,4,5,6),
+                                     type = c("Classical Monocyte",
+                                              "Classical Monocyte",
+                                              "Classical Monocyte",
+                                              "Classical Monocyte",
+                                              "Non-classical Monocyte",
+                                              "mDC",
+                                              "pDC"), stringsAsFactors = FALSE)
+
+
+idx <- match(seurat_schulte_cohort2_Myeloid_clean$RNA_snn_res.0.2, cluster_naming_res.0.2$cluster)
+seurat_schulte_cohort2_Myeloid_clean[['cluster_labels_res.0.2']] <- cluster_naming_res.0.2$type[idx]
+```
+
+### Subsetting of CD14+ classical Monocytes
+
+```{r}
+seurat_schulte_cohort2_Mono <- subset(seurat_schulte_cohort2_Myeloid_clean, subset = cluster_labels_res.0.2 == "Classical Monocyte")
+seurat_schulte_cohort2_Mono
+```
+
+### Define variable genes
+```{r, fig.width= 12}
+seurat_schulte_cohort2_Mono <- FindVariableFeatures(object = seurat_schulte_cohort2_Mono, 
+                                   assay="RNA",
+                                   selection.method = 'vst', 
+                                   nfeatures = 2000
+                                   )
+```
+
+### Scale data
+
+```{r}
+seurat_schulte_cohort2_Mono <- ScaleData(object = seurat_schulte_cohort2_Mono,
+                               vars.to.regress = c("nCount_RNA"))
+```
+
+### PCA
+```{r, fig.height=12,fig.width=12}
+seurat_schulte_cohort2_Mono <- RunPCA(object = seurat_schulte_cohort2_Mono, 
+                              features = VariableFeatures(object = seurat_schulte_cohort2_Mono), 
+                              verbose = FALSE)
+```
+
+### UMAP
+
+```{r}
+seurat_schulte_cohort2_Mono <- RunUMAP(seurat_schulte_cohort2_Mono, reduction = "pca", dims = 1:10, seed.use = 42)
+```
+
+```{r, fig.width=15, fig.height=4}
+p <- DimPlot(object = seurat_schulte_cohort2_Mono, 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "disease_severity",split.by = "disease_severity",ncol=5,pt.size = 0.5
+        ) +
+    scale_color_manual(values = color_group_schulte)+ NoLegend()
+
+p
+```
+
+#---
+
+# Severity-specific DE genes (Suppl. Table XYZ)
+
+Calculate DE genes
+
+```{r}
+DEGs_Mono <- list()
+comparisons <- data.frame(c("mild (3)", "mild (3)", "moderate (4-5)","control", "control", "control"),
+                          c("moderate (4-5)", "severe (7)", "severe (7)", "mild (3)", "moderate (4-5)", "severe (7)"))
+
+  for (j in 1:nrow(comparisons)) {
+    print(paste(comparisons[j,1],comparisons[j,2],sep=" vs "))
+    tryCatch({
+      Idents(seurat_schulte_cohort2_Mono) <- "disease_severity"
+      DEG<-FindMarkers(seurat_schulte_cohort2_Mono,
+                       ident.1 =comparisons[j,1],
+                       ident.2 = comparisons[j,2],
+                       min.pct = 0.1, 
+                       logfc.threshold = 0.2,
+                       test.use = "wilcox", 
+                       slot = "data",
+                       only.pos = F,
+                       verbose = F)
+      DEG$Gene<-rownames(DEG)
+      DEG$cell <- "Monocytes"
+      DEG$comparison<-paste(comparisons[j,1],comparisons[j,2],sep=" vs ")
+      DEGs_Mono[[paste(comparisons[j,1],comparisons[j,2],sep="_")]]<-DEG
+    }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+
+DEGs_Mono_df<- do.call("rbind", DEGs_Mono)
+DEGs_Mono_df$Regulation <- ifelse(DEGs_Mono_df$avg_log2FC<0, "down", "up")
+DEGs_Mono_df$comp_reg <- paste(DEGs_Mono_df$comparison, DEGs_Mono_df$Regulation, sep="_")
+
+write_excel_csv2(DEGs_Mono_df,paste("analysis_output/DEGs_Mono_severity_",Sys.Date(),".csv",sep=""))
+
+# Exclude ribosomal protein-coding genes
+DEGs_Mono_df <- DEGs_Mono_df[!grepl("^RPL|^RPS|^MT-|^HBB|^HBA1|^HBA2", DEGs_Mono_df$Gene),]
+```
+
+```{r, fig.width=12, fig.height=6}
+ggplot(DEGs_Mono_df[DEGs_Mono_df$p_val_adj<0.05,], aes(x = comparison, fill=Regulation))+
+  geom_bar()+
+  geom_text(stat='count', aes(label=..count..),position = position_stack(vjust = .5), size = 2)+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("# of DE genes")+
+  scale_fill_manual(values = rev(color_clusters))+ 
+  RotatedAxis() +facet_wrap(~cell,ncol=6)
+```
+
+#### HALLMARK enrichment analyses of DE genes
+
+```{r, fig.width=8,fig.height=12}
+DE_Mono_HALLMARK_list <- list()
+
+for(i in c("up","down")){
+  print(i)
+  tmp <- seurat_schulte_cohort2_Mono
+  present_genes <- GetAssayData(object = tmp, slot = 'counts')
+  present_genes <- rownames(present_genes[rowSums(present_genes)>3,])
+  present_genes_entrez <- bitr(present_genes, 
+                               fromType = "SYMBOL", 
+                               toType="ENTREZID", 
+                               OrgDb=org.Hs.eg.db)$ENTREZID
+  
+  
+  tmp <- DEGs_Mono_df[DEGs_Mono_df$Regulation == i,]
+  for(j in unique(tmp$comparison)){
+    print(j)
+    DEG <- tmp[tmp$p_val_adj<0.05 & tmp$comparison == j,]
+    symbol <- DEG$Gene
+
+    HALLMARK <- as.data.frame(enricher(symbol,
+                                       TERM2GENE=hallmark_genes,
+                                       universe = present_genes,  
+                                       pAdjustMethod = "bonferroni",
+                                       pvalueCutoff  = 0.2,
+                                       qvalueCutoff  = 0.2))
+    
+    if(nrow(HALLMARK) > 0){
+      HALLMARK$regulation <- as.character(i)
+      HALLMARK$comparison <- as.character(j)
+      HALLMARK$comp_reg <- paste(j,i, sep="_")
+    }
+    DE_Mono_HALLMARK_list[[paste(i, j, sep="_")]] <- HALLMARK
+  }
+}
+```
+
+###### HALLMARK (Suppl. Table XYZ)
+
+```{r, fig.width=20, fig.height=12}
+DE_Mono_HALLMARKresults <- do.call("rbind", DE_Mono_HALLMARK_list)
+
+DE_Mono_HALLMARKresults %>% group_by(comp_reg) %>% top_n(n= 5, wt = Count) -> terms
+
+tmp <- DE_Mono_HALLMARKresults[DE_Mono_HALLMARKresults$Description %in% terms$Description,]
+tmp$Description <- ifelse(nchar(tmp$Description)>80,
+                          paste(substr(tmp$Description, 1, 80),"[...]",sep=""),
+                          tmp$Description)
+tmp$Description <- factor(tmp$Description,levels=unique(tmp$Description))
+
+ggplot(tmp, aes(x = regulation, y = Description, color = p.adjust)) +
+  geom_point(aes(size = Count)) +
+  scale_colour_gradientn(colours=c('red', 
+                                   'orange', 
+                                   'darkblue',
+                                   'darkblue'),
+                         
+                         limits=c(0,1),
+                         values   = c(0,0.05,0.2,0.5,1),
+                         breaks   = c(0.05,0.2,1),
+                         labels = format(c(0.05,0.2,1))) +
+  ylab(NULL) +
+  theme_bw() +
+  theme(text = element_text(size=12))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  facet_wrap(. ~ comparison,scales = "free_x", ncol=6)
+
+write_excel_csv2(DE_Mono_HALLMARKresults,paste("analysis_output/DEGs_CD14_Mono_HALLMARKresults_",Sys.Date(),".csv",sep=""))
+```
+
+###### DotPlot of Hallmark genes (Figure 5A)
+
+```{r, fig.height=16, fig.width=24}
+terms_of_interest <- c("HALLMARK_INTERFERON_GAMMA_RESPONSE",
+                       "HALLMARK_INTERFERON_ALPHA_RESPONSE",
+                       "HALLMARK_TNFA_SIGNALING_VIA_NFKB"
+                       )
+
+list_terms <- list()
+tmp <- DE_Mono_HALLMARKresults[DE_Mono_HALLMARKresults$Description %in% terms_of_interest,]
+for(i in unique(tmp$Description)){
+   list_terms[[paste(i)]] <- unique(unlist(lapply(strsplit(tmp[tmp$Description == i,]$geneID, split = "/"), function(x) x)))
+}
+
+list_terms
+```
+
+```{r, fig.width=5, fig.height=10}
+v <- c("CD83","CD86","TNFAIP3", "GADD45B","BCL6","NR4A1","NR4A2", "IL1B", "DUSP2","DUSP5", "FOSB", "FOS","FOSL1","FOSL2","JUN", "NFKB2",
+       "NFKBIA","NFKBIE","REL", "IRF1", "IRF2","IRF5", "IRF7","STAT1", "STAT2", 
+       "SOCS3", "IFNAR2","OAS1","OAS3", "IFITM1", "IFITM3", "IFIT2", "IFIT3", "IFI35", "ISG20", "ISG15","MX1", "MX2")
+
+p <- DotPlot(seurat_schulte_cohort2_Mono,
+        group.by = "disease_severity",
+        features = v,
+        col.max = 1, col.min = -1, dot.scale = 8)+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+
+### Rcistarget TF prediction analysis (Figure 5B)
+
+```{r}
+Rcistarget_Mono_DE.list <- list()
+
+for(i in unique(DEGs_Mono_df$comp_reg)){
+  print(i)
+  markers <- DEGs_Mono_df[DEGs_Mono_df$comp_reg==i,]
+  print(paste("cluster: ",i, ", marker genes: ",paste(markers$Gene[1:10],collapse=", "),", ...",sep=""))
+  
+  motif_enrichment <- cisTarget(geneSets = markers$Gene, 
+                                motifRankings = motifRankings_10kb,
+                                motifAnnot = motifAnnotations_hgnc,
+                                nesThreshold = 4,
+                                motifAnnot_highConfCat = "directAnnotation"
+                                )
+  
+  if(nrow(motif_enrichment)>0){motif_enrichment$cluster <- as.character(i)}
+  if(nrow(motif_enrichment)>0){Rcistarget_Mono_DE.list[[paste(i)]] <- motif_enrichment}
+}
+
+sapply(Rcistarget_Mono_DE.list, nrow)
+```
+
+```{r}
+Rcistarget_Mono_DE.list$`mild (3) vs severe (7)_up`$TF_highConf
+```
+
+
+```{r, fig.height=4, fig.width=7}
+data <- Rcistarget_Mono_DE.list$`mild (3) vs severe (7)_up`
+data <- data[order(as.numeric(data$nEnrGenes), decreasing = F),]
+data$name <- data$TF_highConf
+data$name <- gsub('\\(.*?\\). ', '', data$name)
+data$description <- paste(ifelse(nchar(data$name)>15,
+                                 paste(substr(data$name, 1, 15),"[...]",sep=""),
+                                 data$name), 
+                          "(",data$motif,")",sep="")
+tmp <- data[!duplicated(data$name),]
+data$plot <- ifelse(data$description %in% tmp$description, "plot highest NES per TF", "")
+data_unfilt <- data[!data$TF_highConf == "",]
+data_unfilt$description <- factor(data_unfilt$description, levels=data_unfilt$description)
+
+p <- ggplot(data_unfilt[grepl("transfac_pro|cisbp|swissregulon",data_unfilt$motif),], aes(x = nEnrGenes, y = description, color = NES)) +
+  geom_point(aes(size = nEnrGenes)) +
+  ylab(NULL) +
+  theme_bw() +
+  theme(text = element_text(size=12))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+p
+```
+
+##### Input gene list filtered for amplified and combinatorial genes
+
+```{r}
+combinedList <- c(list_compressedIFN$Amplified, list_compressedIFN$DoubleTrigger)
+
+genes_filt <- DEGs_Mono$`mild (3)_severe (7)`$Gene[DEGs_Mono$`mild (3)_severe (7)`$Gene %in% combinedList]
+
+
+Rcis_results <- cisTarget(geneSets = genes_filt, 
+                          motifRankings = motifRankings_10kb,
+                          motifAnnot = motifAnnotations_hgnc,
+                          nesThreshold = 4,
+                          motifAnnot_highConfCat = "directAnnotation"
+)
+
+Rcis_results
+```
+
+```{r,fig.width=7, fig.height=7}
+data <- Rcis_results
+data <- data[order(as.numeric(data$nEnrGenes), decreasing = F),]
+data$name <- data$TF_highConf
+data$name <- gsub('\\(.*?\\). ', '', data$name)
+data$description <- paste(ifelse(nchar(data$name)>15,
+                                 paste(substr(data$name, 1, 15),"[...]",sep=""),
+                                 data$name), 
+                          "(",data$motif,")",sep="")
+tmp <- data[!duplicated(data$name),]
+data$plot <- ifelse(data$description %in% tmp$description, "plot highest NES per TF", "")
+data_filt <- data[!data$TF_highConf == "",]
+data_filt$description <- factor(data_filt$description, levels=data_filt$description)
+
+p <- ggplot(data_filt[grepl("transfac_pro|cisbp|swissregulon",data_filt$motif),], aes(x = nEnrGenes, y = description, color = NES)) +
+  geom_point(aes(size = nEnrGenes)) +
+  ylab(NULL) +
+  theme_bw() +
+  theme(text = element_text(size=12))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+p
+```
+
+##### Construct TF network
+```{r}
+network_unfilt_df <- NULL
+for(i in 1:nrow(data_unfilt)){
+  targets <- unlist(strsplit(data_unfilt[i,]$enrichedGenes,split = ";"))
+  TF <- paste("Reg: ",gsub(pattern = " ", replacement = "", x = data_unfilt[i]$name),sep="")
+  df <- data.frame("target"=targets,
+                   "TF"=rep(as.character(TF),times=length(targets)))
+  network_unfilt_df <- rbind(network_unfilt_df, df)
+}
+
+network_filt_df <- NULL
+for(i in 1:nrow(data_filt)){
+  targets <- unlist(strsplit(data_filt[i,]$enrichedGenes,split = ";"))
+  TF <- paste("Reg: ",gsub(pattern = " ", replacement = "", x = data_filt[i]$name),sep="")
+  df <- data.frame("target"=targets,
+                   "TF"=rep(as.character(TF),times=length(targets)))
+  network_filt_df <- rbind(network_filt_df, df)
+}
+
+network_unfilt_df$category <- "unfilt"
+network_filt_df$category <- "filt"
+
+network_df <- rbind(network_filt_df, network_unfilt_df)
+
+network_df$combo <- paste(network_df$target, network_df$TF, sep="_")
+network_df <- network_df[!duplicated(network_df$combo),]
+
+# write_csv(network_df, "cytoscape_network_Rcistarget_monocytes_220811.csv")
+```
+
+Network annotation 
+```{r}
+tmp1 <- data.frame("motif" = unique(network_df$TF),
+                         "category" = "TF_motif")
+tmp1$group <- ifelse(tmp1$motif %in% network_df[network_df$category=="filt",]$TF, "filt", "unfilt")
+
+tmp2 <- data.frame("motif" = unique(network_df$target),
+                         "category" = "TF_target")
+tmp2$group <- ifelse(tmp2$motif %in% network_df[network_df$category=="filt",]$target, "filt", "unfilt")
+anno_table <- rbind(tmp1,tmp2)
+
+anno_table$label <- ifelse(anno_table$group=="filt",anno_table$motif, "")
+
+# write_csv(anno_table, "cytoscape_network-annotation_Rcistarget_monocytes_220811.csv")
+```
+
+## Intersect CD40 unresponsive, amplified and combinatorial signature genes with DEGenes 
+
+```{r, fig.width=12, fig.height=18}
+DE_Mono_list<- list("IFN"=unique(DEGs_Mono_df$Gene[DEGs_Mono_df$Gene %in% list_compressedIFN[['IFN']]]),
+                    "Amplified" = unique(DEGs_Mono_df$Gene[DEGs_Mono_df$Gene %in% list_compressedIFN[['Amplified']]]),
+                    "DoubleTrigger" = unique(DEGs_Mono_df$Gene[DEGs_Mono_df$Gene %in% list_compressedIFN[['DoubleTrigger']]]))
+```
+
+#### Volcano Plot (Figure 4C)
+```{r, fig.width=6, fig.height=4}
+color_cond <- c("DoubleTrigger"= "#B68651",
+                "IFN" = "#982326",
+                "Amplified" = "#5D63A1",
+                "not incl" = "#4f4d4c"
+)
+
+p <- plotVolcano_seu(x=DEGs_Mono_df, 
+                     comparison = "mild (3) vs severe (7)",
+                     color_list = DE_Mono_list,
+                     color_order=c("not incl","IFN", "Amplified","DoubleTrigger"),
+                     color_hex = color_cond,
+                     label_incl = FALSE,
+                     label_select = c("HLA-DRB1","HLA-DRA","JUND","SELL","S100A8","CLU","CD83", "CXCL16", "JUNB", "TNF","FOS","NFKB2","REL", "HLA-E"),
+                     gene_column = "Gene")
+p
+```
+
+#### Gene Set Enrichment analysis on differentially expressed genes in CD14+ monocytes
+
+```{r, fig.width=4, fig.height=3}
+rank <- DEGs_Mono$`mild (3)_severe (7)`$avg_log2FC
+names(rank)<-DEGs_Mono$`mild (3)_severe (7)`$Gene
+
+fgseaRes <- fgsea(pathways = list_compressedIFN, 
+                  stats    = rank,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+p1 <- plotEnrichment(list_compressedIFN$Amplified,
+               rank) + labs(title="Amplified, padj= 0.185")
+p2 <- plotEnrichment(list_compressedIFN$DoubleTrigger,
+               rank) + labs(title="Combinatorial, padj= 0.009")
+p1/p2
+```
+
+#---
+
+## Subset analysis of mDC (clustering-based)
+
+```{r}
+seurat_schulte_cohort2_mDC <- subset(seurat_schulte_cohort2_Myeloid_clean, subset = cluster_labels_res.0.2 == "mDC")
+seurat_schulte_cohort2_mDC
+```
+
+### Identify severity marker genes (Figure 4D)
+
+```{r}
+Idents(seurat_schulte_cohort2_mDC) <- "disease_severity"
+mDC_group_time.markers.wilcox <- FindAllMarkers(object = seurat_schulte_cohort2_mDC,
+                                                 only.pos = TRUE,
+                                                 min.pct = 0.1,
+                                                 logfc.threshold = 0.2,
+                                                 min.diff.pct = 0.1,
+                                                 test.use = "wilcox"
+)
+
+write_excel_csv2(mDC_group_time.markers.wilcox,paste("analysis_output/DEGs_mDC_severity_",Sys.Date(),".csv",sep=""))
+
+# Exclude ribosomal protein-coding, mitochondrial and hbgenes
+mDC_group_time.markers.wilcox <- mDC_group_time.markers.wilcox[!grepl("^RPL|^RPS|^MT-|^HBB|^HBA1|^HBA2", mDC_group_time.markers.wilcox$gene),]
+```
+
+###### Dotplot
+
+```{r, fig.width=6, fig.height=10}
+top <- mDC_group_time.markers.wilcox %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+
+p <- DotPlot(seurat_schulte_cohort2_mDC,
+        group.by = "disease_severity",
+        features = unique(top$gene),col.max = 1, col.min = -1, dot.scale = 8)+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+```{r}
+v <- unique(c(list_compressedIFN$IFN[list_compressedIFN$IFN %in% 
+                                             mDC_group_time.markers.wilcox[!mDC_group_time.markers.wilcox$cluster=="control",]$gene],
+              list_compressedIFN$Amplified[list_compressedIFN$Amplified %in%
+                                             mDC_group_time.markers.wilcox[!mDC_group_time.markers.wilcox$cluster=="control",]$gene],
+              list_compressedIFN$DoubleTrigger[list_compressedIFN$DoubleTrigger %in%
+                                             mDC_group_time.markers.wilcox[!mDC_group_time.markers.wilcox$cluster=="control",]$gene]))
+```
+
+
+```{r, fig.width=10, fig.height=3}
+p <- DotPlot(seurat_schulte_cohort2_mDC,
+        group.by = "disease_severity",
+        features = rev(v),
+        col.max = 1, col.min = -1, dot.scale = 8)+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+
+p
+```
+
+# --------------------------------------------------------
+# --------------------------------------------------------
+
+# Analysis of additional validation data sets
+
+#---
+
+# Arunachalam et al.
+
+https://science.sciencemag.org/content/369/6508/1210
+https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE155673
+
+Systems biological assessment of immunity to mild versus severe COVID-19 infection in humans (Arunachalam et al., 2020)
+
+# Annotated data set from Arunachalam et al.
+```{r, fig.height=8, fig.width=12}
+seurat_arunachalam_annot <- readRDS("DC_scRNA_Arunachalam/srt_obj_covid_science2020.RDS")
+
+DimPlot(object = seurat_arunachalam_annot,
+        reduction = 'umap',
+        label = TRUE,
+        group.by = "final_clust_review", pt.size = 0.1)+
+  scale_color_manual(values = color_clusters)
+```
+
+```{r}
+Arunachalam_anno <- read.csv("DC_scRNA_Arunachalam/sample_anno.csv", stringsAsFactors = F)
+
+Arunachalam_anno$Severity <- ifelse(is.na(Arunachalam_anno$Severity),"Control",Arunachalam_anno$Severity)
+Arunachalam_anno$days_since_symptom_onset <- ifelse(is.na(Arunachalam_anno$days_since_symptom_onset),
+                                                    0,Arunachalam_anno$days_since_symptom_onset)
+Arunachalam_anno$disease_stage <- ifelse(Arunachalam_anno$Severity == "Control", "Control",
+                                         ifelse(Arunachalam_anno$days_since_symptom_onset > 10 , "late","early")
+                                         )
+
+cell_meta <- data.frame(cells = Cells(seurat_arunachalam_annot),
+                        donor= seurat_arunachalam_annot$subj_code,
+                        row.names = Cells(seurat_arunachalam_annot),
+                        stringsAsFactors = FALSE)
+
+idx <- match(cell_meta$donor,
+             Arunachalam_anno$Sample_ID)
+
+seurat_arunachalam_annot[["disease_severity"]] <- Arunachalam_anno$Severity[idx]
+seurat_arunachalam_annot[["days_after_onset"]] <- Arunachalam_anno$days_since_symptom_onset[idx]
+seurat_arunachalam_annot[["disease_stage"]] <- Arunachalam_anno$disease_stage[idx]
+seurat_arunachalam_annot[["severity_stage"]] <- paste(seurat_arunachalam_annot$disease_severity,seurat_arunachalam_annot$disease_stage, sep="_")
+```
+
+# Subset Analysis of Monocyte and DC analysis
+
+```{r}
+seurat_arunachalam_Myeloid <- subset(seurat_arunachalam_annot, subset = final_clust_review %in% c("C3-C MONO_1",
+                                                                                                  "C4-NC MONO",
+                                                                                                  "C5-CDC2",
+                                                                                                  "C10-PDC",
+                                                                                                  "C11-C MONO_IFN",
+                                                                                                  "C16-C MONO_2",
+                                                                                                  "C22-C MONO_3",
+                                                                                                  "C24-CDC1")
+                                 )
+```
+
+
+### Seurat v4 Reference Annotation (Azimuth)
+
+Normalize query data using sc transform 
+```{r}
+seurat_arunachalam_Myeloid.sc <- SCTransform(seurat_arunachalam_Myeloid, verbose = FALSE)
+```
+
+
+```{r}
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = seurat_arunachalam_Myeloid.sc,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+```
+
+
+```{r}
+seurat_arunachalam_Myeloid.sc <- MapQuery(
+  anchorset = anchors,
+  query = seurat_arunachalam_Myeloid.sc,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca", 
+  reduction.model = "wnn.umap"
+)
+```
+
+```{r, fig.width=12, fig.height=6}
+p1 = DimPlot(seurat_arunachalam_Myeloid.sc, reduction = "ref.umap", group.by = "predicted.celltype.l1", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+p2 = DimPlot(seurat_arunachalam_Myeloid.sc, reduction = "ref.umap", group.by = "predicted.celltype.l2", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+
+p1 + p2
+```
+
+
+```{r}
+seurat_arunachalam_Myeloid$predicted.celltype.l1 <- seurat_arunachalam_Myeloid.sc$predicted.celltype.l1
+seurat_arunachalam_Myeloid$predicted.celltype.l1.score <- seurat_arunachalam_Myeloid.sc$predicted.celltype.l1.score
+
+seurat_arunachalam_Myeloid$predicted.celltype.l2 <- seurat_arunachalam_Myeloid.sc$predicted.celltype.l2
+seurat_arunachalam_Myeloid$predicted.celltype.l2.score <- seurat_arunachalam_Myeloid.sc$predicted.celltype.l2.score
+```
+
+#### Clean up
+```{r}
+seurat_arunachalam_Myeloid_clean <- subset(seurat_arunachalam_Myeloid, subset= predicted.celltype.l2 %in% c("CD14 Mono",
+                                                                                                            "CD16 Mono",
+                                                                                                            "cDC1",
+                                                                                                            "cDC2",
+                                                                                                            "pDC"))
+```
+
+### Analysis of mDCs
+
+```{r}
+seurat_arunachalam_mDC_clean <- subset(seurat_arunachalam_Myeloid_clean, subset = final_clust_review %in% c("C5-CDC2",
+                                                                                                            "C24-CDC1"))
+
+```
+
+##### Identify disease marker genes
+
+```{r}
+Idents(seurat_arunachalam_mDC_clean) <- "severity_stage"
+Arunachalam_mDC_group.markers.wilcox <- FindAllMarkers(object = seurat_arunachalam_mDC_clean,
+                                                 only.pos = TRUE,
+                                                 min.pct = 0.2,
+                                                 logfc.threshold = 0.2,
+                                                 min.diff.pct = 0.1,
+                                                 test.use = "wilcox"
+)
+```
+
+##### Dotplot (Figure S3A)
+
+```{r, fig.width=4, fig.height=10}
+top <- Arunachalam_mDC_group.markers.wilcox %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+
+p <- DotPlot(seurat_arunachalam_mDC_clean,
+        group.by = "severity_stage",
+        features = unique(top$gene))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+Plot genes from Schulte-Schrepping mDC intersection on Arunachalam data
+```{r, fig.width=10, fig.height=4}
+v <- unique(c(list_compressedIFN$IFN[list_compressedIFN$IFN %in% 
+                                             mDC_group_time.markers.wilcox[!mDC_group_time.markers.wilcox$cluster=="control",]$gene],
+              list_compressedIFN$Amplified[list_compressedIFN$Amplified %in%
+                                             mDC_group_time.markers.wilcox[!mDC_group_time.markers.wilcox$cluster=="control",]$gene],
+              list_compressedIFN$DoubleTrigger[list_compressedIFN$DoubleTrigger %in%
+                                             mDC_group_time.markers.wilcox[!mDC_group_time.markers.wilcox$cluster=="control",]$gene]))
+
+p <- DotPlot(seurat_arunachalam_mDC_clean,
+        group.by = "severity_stage",
+        features = rev(v),
+        col.max = 1, col.min = -1, dot.scale = 8)+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+p
+```
+
+#-----------------------------------------------------------------------
+
+# Chua et al., Lung tissue data
+
+downloaded from https://doi.org/10.6084/m9.figshare.12436517
+
+```{r, fig.height=12, fig.width=12}
+seurat_chua_main <- readRDS("Chua_2020/covid_nbt_main.rds")
+seurat_chua_main
+
+DimPlot(object = seurat_chua_main,
+        reduction = 'umap',
+        label = TRUE,
+        group.by = "severity", pt.size = 0.1)+
+  scale_color_manual(values = color_clusters)
+```
+
+```{r}
+# quantify cells of each sample per cluster
+cells_cluster <- confusionMatrix(paste0(seurat_chua_main$celltype),
+                                 paste0(seurat_chua_main$severity))
+
+pheatmap::pheatmap(
+  mat = as.matrix(cells_cluster),
+  cluster_cols = FALSE,
+  border_color = "black",display_numbers = TRUE,
+  cluster_rows = FALSE
+)
+```
+
+#---
+
+## Subset analysis of CD8 + T cells
+
+```{r}
+seurat_chua_Tcell <- subset(seurat_chua_main, subset = celltype == "CTL")
+```
+
+### Seurat v4 Reference Annotation (Azimuth)
+
+```{r}
+seurat_chua_Tcell.sc <- SCTransform(seurat_chua_Tcell, verbose = FALSE)
+```
+
+```{r}
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = seurat_chua_Tcell.sc,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+```
+
+
+```{r}
+seurat_chua_Tcell.sc <- MapQuery(
+  anchorset = anchors,
+  query = seurat_chua_Tcell.sc,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca", 
+  reduction.model = "wnn.umap"
+)
+```
+
+```{r, fig.width=12, fig.height=6}
+p1 = DimPlot(seurat_chua_Tcell.sc, reduction = "ref.umap", group.by = "predicted.celltype.l1", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+p2 = DimPlot(seurat_chua_Tcell.sc, reduction = "ref.umap", group.by = "predicted.celltype.l2", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+
+p1 + p2
+```
+
+```{r}
+seurat_chua_Tcell$predicted.celltype.l1 <- seurat_chua_Tcell.sc$predicted.celltype.l1
+seurat_chua_Tcell$predicted.celltype.l1.score <- seurat_chua_Tcell.sc$predicted.celltype.l1.score
+
+seurat_chua_Tcell$predicted.celltype.l2 <- seurat_chua_Tcell.sc$predicted.celltype.l2
+seurat_chua_Tcell$predicted.celltype.l2.score <- seurat_chua_Tcell.sc$predicted.celltype.l2.score
+```
+
+```{r}
+seurat_chua_Tcell$predicted.T <- ifelse(seurat_chua_Tcell$predicted.celltype.l2 %in% c("CD4 Naive", "CD4 TCM",  "CD4 TEM",  "CD4 CTL",  
+                                                                                       "CD4 Proliferating", "CD8 Naive", "CD8 TCM", 
+                                                                                       "CD8 TEM", "CD8 Proliferating", "Treg", "gdT", 
+                                                                                       "MAIT", "dnT","NK", "NK Proliferating", "NK_CD56bright"),
+                                        seurat_chua_Tcell$predicted.celltype.l2, 
+                                        "other")
+
+table(seurat_chua_Tcell$predicted.T)
+```
+
+## Clean up
+
+```{r}
+seurat_chua_CD8_clean <- subset(seurat_chua_Tcell, subset= predicted.T %in% c("CD8 Naive", "CD8 Proliferating", "CD8 TCM", "CD8 TEM"))
+```
+
+## AUcell enrichment of helped and unhelped CD8 T cell signatures (Suppl. Fig. 3D)
+
+Build cell ranking
+```{r}
+tmp <- as.matrix(seurat_chua_CD8_clean@assays$RNA@data)
+
+rSum<-rowSums(tmp)
+keep<-names(rSum[rSum>10])
+tmp <- tmp[row.names(tmp) %in% keep,]
+cells_rankings_chua <- AUCell_buildRankings(as.matrix(tmp), verbose = TRUE, nCores=4)
+```
+
+```{r}
+# Calculate AUC scores
+cells_AUC_Tcell_chua <- AUCell_calcAUC(Tcell_sig_list, 
+                                       cells_rankings_chua, 
+                                       aucMaxRank = ceiling(0.03 * nrow(cells_rankings)), 
+                                       normAUC = T)
+```
+
+#### Violinplots
+
+```{r, fig.width6, fig.height=3}
+tmp <- getAUC(cells_AUC_Tcell_chua)
+tmp <- as.data.frame(t(tmp))
+df <- data.frame(row.names = row.names(seurat_chua_CD8_clean@meta.data), 
+                 cluster = seurat_chua_CD8_clean$celltype, 
+                 disease = seurat_chua_CD8_clean$severity,
+                 stringsAsFactors = F)
+#Merge two annot columns
+df <- as.data.frame(merge(df, tmp, by = 0))
+tmp <- subset(seurat_chua_CD8_clean,subset = severity %in% c("moderate","critical"))
+df <- df[df$Row.names %in% Cells(tmp),]
+
+df$disease <- factor(df$disease, levels=c("moderate",
+                                          "critical"))
+df.melt <- reshape2::melt(df)
+
+df.melt$tmp <- paste(df.melt$cluster, df.melt$disease, df.melt$variable, sep="_")
+#Calculate the mean
+df.melt %>% group_by(tmp) %>% summarize(Mean = mean(value, na.rm=TRUE)) -> df.tmp
+df.tmp$Mean <- scale(df.tmp$Mean)
+df <- merge(df.melt, df.tmp, key = "cluster_group", all = T)
+
+gg <- ggplot(df, aes(y = value, 
+                     x = disease, 
+                     group = disease,
+                     color=disease)) +
+  geom_violin(scale = "area", trim = T, adjust = 3, draw_quantiles = c(0.25, 0.5, 0.75), fill = "white") +
+  ylab("AUC score") + xlab("cluster") +
+    scale_color_manual(values = color_group_chua)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line.x = element_line(color="black", size = .3),
+        axis.line.y = element_line(color="black", size = .3))+ facet_wrap(cluster ~ variable, scales="free", ncol=2)+
+  theme(
+    strip.background = element_rect(
+      color="black", fill="white", size=0, linetype="solid"
+    )
+  )
+
+gg
+```
+
+#----------------------------------------------------------------------
+
+# Bernardes et al. 2020, Immunity
+
+https://www.sciencedirect.com/science/article/pii/S1074761320305045?via%3Dihub 
+
+## Load seurat object
+
+```{r}
+seurat_bernardes <- readRDS("bernardes_2020/seurat_covid19_forBonn_processed_2020-08-21.rds")
+
+head(seurat_bernardes@meta.data)
+```
+
+
+```{r}
+# load Kiel metadata
+meta_Kiel <- read.csv("/home/jonas/data/analysis/analysis_revision_200616/Kiel_data/Clinicaldata_scRNAseq_kiel.csv", sep = ";")
+meta_Kiel_sub <- meta_Kiel[,c("orig.ident", "TimepointFromOnset")]
+
+# change Kiel annotation to our groups
+seurat_bernardes@meta.data[seurat_bernardes@meta.data$Disease %in% c("Complicated (incremental)", 
+                                                                     "Complicated (recovering)", 
+                                                                     "Complicated with hyperinflammatory syndrom", 
+                                                                     "Critical"), 
+                           "group_per_sample"] <- "severe"
+seurat_bernardes@meta.data[seurat_bernardes@meta.data$Disease %in% c("Healthy"), 
+                           "group_per_sample"] <- "control"
+seurat_bernardes@meta.data[seurat_bernardes@meta.data$Disease %in% c("Mild (recovering)"), 
+                           "group_per_sample"] <- "mild"
+seurat_bernardes@meta.data[seurat_bernardes@meta.data$Disease %in% c("Recovered"), 
+                           "group_per_sample"] <-  "recovered"
+seurat_bernardes@meta.data[seurat_bernardes@meta.data$Disease %in% c("recovery/asymptomatic"), 
+                           "group_per_sample"] <-  "asymptomatic/recovery"
+
+
+idx <- match(seurat_bernardes$orig.ident, meta_Kiel_sub$orig.ident)
+seurat_bernardes[["TimepointFromOnset"]] <- meta_Kiel_sub$TimepointFromOnset[idx]
+seurat_bernardes$disease_stage <- ifelse(seurat_bernardes$TimepointFromOnset >10, "late","early")
+seurat_bernardes$disease_stage <- ifelse(seurat_bernardes$group_per_sample == "control", "control",seurat_bernardes$disease_stage)
+seurat_bernardes$group_time <- paste(seurat_bernardes$group_per_sample, seurat_bernardes$disease_stage, sep="_")
+```
+
+#### Inspect original UMAP 
+
+cell_types2 contains published celltype annotation
+
+```{r, fig.width=8, fig.height=8}
+table(seurat_bernardes$cell_types2)
+
+DimPlot(seurat_bernardes, 
+        reduction = "umap", 
+        group.by = "cell_types2", 
+        order = T, 
+        label = T)+ggtitle("celltype")+NoLegend()
+```
+
+#---
+
+### Seurat v4 Reference Annotation (Azimuth)
+
+Normalize query data using sc transform 
+
+```{r}
+seurat_bernardes.sc <- SCTransform(seurat_bernardes, verbose = FALSE)
+```
+
+```{r}
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = seurat_bernardes.sc,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+```
+
+
+```{r}
+seurat_bernardes.sc <- MapQuery(
+  anchorset = anchors,
+  query = seurat_bernardes.sc,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca", 
+  reduction.model = "wnn.umap"
+)
+```
+
+```{r, fig.width=12, fig.height=6}
+p1 = DimPlot(seurat_bernardes.sc, reduction = "ref.umap", group.by = "predicted.celltype.l1", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+p2 = DimPlot(seurat_bernardes.sc, reduction = "ref.umap", group.by = "predicted.celltype.l2", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+
+p1 + p2
+```
+
+```{r}
+seurat_bernardes$predicted.celltype.l1 <- seurat_bernardes.sc$predicted.celltype.l1
+seurat_bernardes$predicted.celltype.l1.score <- seurat_bernardes.sc$predicted.celltype.l1.score
+
+seurat_bernardes$predicted.celltype.l2 <- seurat_bernardes.sc$predicted.celltype.l2
+seurat_bernardes$predicted.celltype.l2.score <- seurat_bernardes.sc$predicted.celltype.l2.score
+```
+
+## Subset analysis of CD8 + T cells
+
+```{r}
+table(seurat_bernardes$cell_types2)
+
+seurat_bernardes_CD8 <- subset(seurat_bernardes, subset = cell_types2 == "CD8+ T cells")
+table(seurat_bernardes_CD8$disease_stage)
+table(seurat_bernardes_CD8$group_per_sample)
+```
+
+
+### Clean up of CD8 T cells
+
+```{r}
+seurat_bernardes_CD8_clean <- subset(seurat_bernardes_CD8, subset= predicted.celltype.l2 %in% c("CD8 Naive", 
+                                                                                                "CD8 Proliferating", 
+                                                                                                "CD8 TCM", 
+                                                                                                "CD8 TEM"))
+```
+
+## Dotplot of selected key genes across disease severities (Suppl. Fig. 3B)
+
+```{r, fig.width=6, fig.height=4}
+p <- DotPlot(subset(seurat_bernardes_CD8_clean, subset = group_per_sample %in% c("control",
+                                                                                  "mild",
+                                                                                  "severe")),
+              group.by = "group_per_sample",
+              features = c("IL7R","CD69","FOSL2","JUNB","JUND","CXCR4","DUSP1","DUSP2","KLRG1","CX3CR1","SELL"),col.max = 1, col.min = -1, dot.scale = 8)+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+## AUcell enrichment of helped and unhelped CD8 T cell signatures (Suppl. Fig. 3C)
+
+Build cell ranking
+```{r}
+tmp1 <- as.matrix(seurat_bernardes_CD8_clean@assays$RNA@data[,1:25000])
+tmp2 <- as.matrix(seurat_bernardes_CD8_clean@assays$RNA@data[,25001:ncol(seurat_bernardes_CD8_clean@assays$RNA@data)])
+
+tmp <- do.call(cbind,list(tmp1, tmp2))
+
+rSum<-rowSums(tmp)
+keep<-names(rSum[rSum>10])
+tmp <- tmp[row.names(tmp) %in% keep,]
+cells_rankings_bernardes_CD8 <- AUCell_buildRankings(as.matrix(tmp), verbose = TRUE, nCores=4)
+```
+
+```{r}
+# Calculate AUC scores
+cells_AUC_CD8_bernardes <- AUCell_calcAUC(Tcell_sig_list, 
+                                  cells_rankings_bernardes_CD8, 
+                                  aucMaxRank = ceiling(0.03 * nrow(cells_rankings)), 
+                                  normAUC = T)
+```
+
+#### Violinplots
+
+```{r, fig.width=6, fig.height=4}
+tmp <- getAUC(cells_AUC_CD8_bernardes)
+tmp <- as.data.frame(t(tmp))
+df <- data.frame(row.names = row.names(seurat_bernardes_CD8_clean@meta.data), 
+                 disease = seurat_bernardes_CD8_clean$group_per_sample,
+                 disease_stage = seurat_bernardes_CD8_clean$group_time,
+                 stringsAsFactors = F)
+
+#Merge two annot columns
+df <- as.data.frame(merge(df, tmp, by = 0))
+
+tmp <- subset(seurat_bernardes_CD8_clean, subset = group_per_sample %in% c("control",
+                                                                  "mild",
+                                                                  "severe"))
+df <- df[df$Row.names %in% Cells(tmp),]
+
+df$disease <- factor(df$disease, levels=c("control",
+                                          "mild",
+                                          "severe"))
+df.melt <- reshape2::melt(df)
+
+df.melt$tmp <- paste(df.melt$cluster, df.melt$disease, df.melt$variable, sep="_")
+
+gg <- ggplot(df.melt, aes(y = value, 
+                          x = disease, 
+                          group = disease,
+                          color=disease)) +
+  geom_violin(scale = "area", trim = T, adjust = 3, draw_quantiles = c(0.25, 0.5, 0.75), fill = "white") +
+  ylab("AUC score") + xlab("cluster") +
+  scale_color_manual(values = color_group_bernardes)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        panel.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line.x = element_line(color="black", size = .3),
+        axis.line.y = element_line(color="black", size = .3))+ facet_wrap(. ~ variable, scales="free", ncol=2)+
+  theme(
+    strip.background = element_rect(
+      color="black", fill="white", size=0, linetype="solid"
+    )
+  )
+
+gg
+```
+
+#-----------------------------------------------------------------------
+
+# Save seurat objects
+
+```{r}
+SaveH5Seurat(
+  object= seurat_schulte_cohort2_CD8_filtVarFeatures,
+  file= paste("seurat_objects/Seurat_Schulte-Schrepping_Rhapsody_CD8T_",Sys.Date(),sep=""))
+```
+
+```{r}
+SaveH5Seurat(
+  object= seurat_schulte_cohort2_Mono,
+  file= paste("seurat_objects/Seurat_Schulte-Schrepping_Rhapsody_CD14Mono_",Sys.Date(),sep=""))
+```
+```{r}
+SaveH5Seurat(
+  object= seurat_schulte_cohort2_mDC,
+  file= paste("seurat_objects/Seurat_Schulte-Schrepping_Rhapsody_mDC_",Sys.Date(),sep=""))
+```
+
+```{r}
+SaveH5Seurat(
+  object= seurat_arunachalam_mDC_clean,
+  file= paste("seurat_objects/Seurat_Arunachalam_mDC_",Sys.Date(),sep=""))
+```
+
+```{r}
+SaveH5Seurat(
+  object= seurat_chua_CD8_clean,
+  file= paste("seurat_objects/Seurat_Chua_CD8_",Sys.Date(),sep=""))
+```
+
+```{r}
+SaveH5Seurat(
+  object= seurat_bernardes_CD8_clean,
+  file= paste("seurat_objects/Seurat_Bernardes_CD8T_",Sys.Date(),sep=""))
+```
+
+
+```{r}
+sessionInfo()
+```
