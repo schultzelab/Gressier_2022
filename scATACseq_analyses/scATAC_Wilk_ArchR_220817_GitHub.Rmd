@@ -1,0 +1,1151 @@
+---
+title: "Single-cell ATAC-seq analysis: Public COVID1-9 ATAC-seq data by Wilk et al., JEM 2020"
+author: "Jonas Schulte-Schrepping"
+date: "2022.05.30"
+output: 
+  html_document: 
+    code_download: yes
+    df_print: kable
+    theme: united
+    toc: yes
+    toc_depth: 8
+    toc_float: yes
+---
+
+# Data sources:
+
+https://rupress.org/jem/article-pdf/218/8/e20210582/1417996/jem_20210582.pdf
+https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE174072
+https://github.com/ajwilk/COVID_scMultiome
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Random seed
+```{r}
+set.seed(42)
+```
+
+#Global settings:
+
+## Install packages
+
+```{r}
+# ArchR::installExtraPackages()
+```
+
+## Load packages
+
+```{r, message=FALSE}
+library(future)
+library(future.apply)
+library(tidyverse)
+library(ggrepel)
+library(rhdf5)
+library(cowplot)
+library(clusterProfiler)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(org.Hs.eg.db)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(Seurat)
+library(GenomeInfoDb)
+library(EnsDb.Hsapiens.v86)
+library(ggplot2)
+library(patchwork)
+library(reshape2)
+library(SeuratDisk)
+library(Cairo)
+library(ArchR)
+library(JASPAR2020)
+library(UpSetR)
+library(biomaRt)
+```
+
+## Settings for parallel computing
+```{r}
+# change the current plan to access seurat parallelization
+plan("multiprocess", workers = 12)
+options(future.globals.maxSize = 20000 * 1024^2)
+addArchRThreads(threads = 1) 
+```
+
+## Load Hallmark Gene sets
+
+```{r}
+# transpose gene names to human symbols
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+```
+
+```{r}
+hallmark_genes <- clusterProfiler::read.gmt("h.all.v6.2.entrez.gmt")
+```
+
+## Functions 
+
+### Confusion Matrix
+```{r}
+confusionMatrix <- function (i = NULL, j = NULL) 
+{
+  ui <- unique(i)
+  uj <- unique(j)
+  m <- Matrix::sparseMatrix(i = match(i, ui), j = match(j,uj), x = rep(1, length(i)), dims = c(length(ui), length(uj)))
+  rownames(m) <- ui
+  colnames(m) <- uj
+  m
+}
+```
+
+
+### Volcano Plot
+
+```{r, fig.width=8, fig.height=6}
+volcano_plot <- function(data,
+                         useGroups,
+                         labelnum = 20,
+                         force_labels= NULL,
+                         name_col = "name",
+                         FDR_cutoff = 0.01,
+                         FC_cutoff = 0.58,
+                         x_lim=3){
+  tmp <- getMarkers(data, cutOff = "FDR < 1")
+  tmp <- as.data.frame(tmp[,useGroups])
+  tmp$col <- ifelse(tmp$FDR <= FDR_cutoff & tmp$Log2FC >= FC_cutoff,"up",
+                    ifelse(tmp$FDR <= FDR_cutoff & tmp$Log2FC <= -FC_cutoff,"down",
+                           "n.s."))
+  
+  if(is.null(force_labels)){
+    # specify labeling   
+    upDE <-  as.data.frame(tmp[tmp$Log2FC >0,]) 
+    FClabel_up <- upDE[order(abs(upDE$Log2FC), decreasing = TRUE),]
+    if(nrow(FClabel_up)>labelnum){
+      FClabel_up <- as.character(FClabel_up[c(1:labelnum),"name"])
+    } else {
+      FClabel_up <- as.character(FClabel_up[,"name"])}
+    plabel_up <- upDE[order(upDE$FDR, decreasing = FALSE),]
+    if(nrow(plabel_up)>labelnum){
+      plabel_up <- as.character(plabel_up[c(1:labelnum),"name"])
+    } else {
+      plabel_up <- as.character(plabel_up[,gene_column])
+    }
+    
+    # specify labeling   
+    downDE <-  as.data.frame(tmp[tmp$Log2FC <0,]) 
+    FClabel_down <- downDE[order(abs(downDE$Log2FC), decreasing = TRUE),]
+    if(nrow(FClabel_down)>labelnum){
+      FClabel_down <- as.character(FClabel_down[c(1:labelnum),"name"])
+    } else {
+      FClabel_down <- as.character(FClabel_down[,"name"])}
+    plabel_down <- downDE[order(downDE$FDR, decreasing = FALSE),]
+    if(nrow(plabel_down)>labelnum){
+      plabel_down <- as.character(plabel_down[c(1:labelnum),"name"])
+    } else {
+      plabel_down <- as.character(plabel_down[,gene_column])
+    }
+    
+    label<- unique(c(FClabel_up, plabel_up, FClabel_down, plabel_down))
+    tmp$label<- ifelse(tmp$name %in% label == "TRUE",
+                       as.character(tmp$name), "")
+  }else{
+    tmp$label <- ifelse(tmp$name %in% force_labels == "TRUE",
+                       as.character(tmp$name), "")
+  }
+  
+  p <- ggplot(data=tmp[!(tmp$Log2FC>-FC_cutoff & tmp$Log2FC< FC_cutoff | tmp$FDR > FDR_cutoff),], aes(x=Log2FC, y=-log10(FDR))) +
+    scale_x_continuous(limits=c(-x_lim,x_lim))+
+    geom_vline(xintercept = 0, colour="black")+
+    geom_vline(xintercept = c(-0.58,0.58), colour="grey")+
+    geom_hline(yintercept=-log(0.05,10),colour="grey")+
+    geom_point(aes(colour=col), size=1) +
+    xlab("log2(FoldChange)") +
+    ylab("-log10(FDR)") +
+    geom_text_repel(aes(label=label), size=2, max.overlaps = Inf, segment.size = 0.1)+
+    geom_text(aes(x_lim-1, 100, label = sum(FDR <= FDR_cutoff &
+                                         Log2FC >= FC_cutoff)), 
+              col = "black")+
+    geom_text(aes(-x_lim+1, 100, label = sum(FDR <= FDR_cutoff &
+                                          Log2FC <= -FC_cutoff)), 
+              col = "black")+
+    theme_bw() + scale_color_manual(values=c("n.s."="grey", "up"="#a63232", "down"="#335599"))+ theme(legend.position = "none")
+  
+  p
+}
+```
+
+### GSEA
+
+```{r}
+scGSEA <-  function(input,
+                    pvalueCutoff = 0.1,
+                    qvalueCutoff = 0.1){ 
+  
+  results <- list()
+  
+  # Open in Glucan
+  symbol_up <- input[input$Log2FC>0,]$name
+  entrez_up <- bitr(unique(symbol_up), 
+                    fromType = "SYMBOL", 
+                    toType="ENTREZID", 
+                    OrgDb=org.Hs.eg.db)$ENTREZID
+  symbol_down <- input[input$Log2FC<0,]$name
+  entrez_down <- bitr(unique(symbol_down), 
+                    fromType = "SYMBOL", 
+                    toType="ENTREZID", 
+                    OrgDb=org.Hs.eg.db)$ENTREZID
+  # GO enrichment
+    results$GOup <- as.data.frame(enrichGO(gene = entrez_up,
+                                           universe = present_genes_entrez,
+                                           OrgDb = org.Hs.eg.db,
+                                           ont = "BP",
+                                           pAdjustMethod = "bonferroni",
+                                           pvalueCutoff  = pvalueCutoff,
+                                           qvalueCutoff  = qvalueCutoff,
+                                           readable      = T))
+    
+    results$GOdown <- as.data.frame(enrichGO(gene = entrez_down,
+                                           universe = present_genes_entrez,
+                                           OrgDb = org.Hs.eg.db,
+                                           ont = "BP",
+                                           pAdjustMethod = "bonferroni",
+                                           pvalueCutoff  = pvalueCutoff,
+                                           qvalueCutoff  = qvalueCutoff,
+                                           readable      = T))
+    
+  # KEGG enrichment
+  results$KEGGup <- as.data.frame(enrichKEGG(gene = entrez_up, 
+                                               organism = "hsa",
+                                               universe = present_genes_entrez,
+                                               pAdjustMethod = "bonferroni",
+                                               pvalueCutoff  = pvalueCutoff,
+                                               qvalueCutoff = qvalueCutoff))
+    
+    results$KEGGdown <- as.data.frame(enrichKEGG(gene = entrez_down, 
+                                               organism = "hsa",
+                                               universe = present_genes_entrez,
+                                               pAdjustMethod = "bonferroni",
+                                               pvalueCutoff  = pvalueCutoff,
+                                               qvalueCutoff = qvalueCutoff))
+    
+    # HALLMARK enrichment
+    results$HALLMARKup <- as.data.frame(enricher(entrez_up,
+                                                 TERM2GENE=hallmark_genes,
+                                                 universe = present_genes_entrez,  
+                                                 pAdjustMethod = "bonferroni",
+                                                 pvalueCutoff  = pvalueCutoff,
+                                                 qvalueCutoff  = qvalueCutoff))
+    
+    # HALLMARK enrichment
+    results$HALLMARKdown <- as.data.frame(enricher(entrez_down,
+                                                 TERM2GENE=hallmark_genes,
+                                                 universe = present_genes_entrez,  
+                                                 pAdjustMethod = "bonferroni",
+                                                 pvalueCutoff  = pvalueCutoff,
+                                                 qvalueCutoff  = qvalueCutoff))
+    return(results)
+}
+```
+
+
+### GSEA DotPlot
+
+```{r}
+dotplotGSEA <- function(x,
+                        show=25,
+                        font.size=10,
+                        title=NULL,
+                        title.size=10,
+                        title.width=100,
+                        order="count"){
+  if(nrow(x)<1){
+    print("No enrichment found.")
+  }else{
+    x <- if(nrow(x)>show){x[c(1:show),]}else{x}
+    if(order=="padj"){
+      x <- x[order(x$Count,decreasing=FALSE),]
+      x$Description <- ifelse(nchar(x$Description)>50,
+                              paste(substr(x$Description, 1, 50),"[...]",sep=""),
+                              x$Description)
+      x$GeneRatio <- factor(x$GeneRatio, levels = unique(x$GeneRatio))
+      x <- x[order(x$p.adjust,decreasing=TRUE),]
+      x$Description <- factor(x$Description, levels = unique(x$Description))
+    }
+    if(order=="count"){
+      x <- x[order(x$Count,decreasing=FALSE),]
+      x$Description <- ifelse(nchar(x$Description)>50,
+                              paste(substr(x$Description, 1, 50),"[...]",sep=""),
+                              x$Description)
+      x$Description <- factor(x$Description, levels = unique(x$Description))
+      x$GeneRatio <- factor(x$GeneRatio, levels = unique(x$GeneRatio))
+    }
+    ggplot(x, aes(x = Count, y = Description, color = p.adjust)) +
+      geom_point(aes(size = Count)) +
+      scale_colour_gradientn(colours=c('red', 
+                                       'orange', 
+                                       'darkblue',
+                                       'darkblue'),
+                             limits=c(0,1),
+                             values   = c(0,0.05,0.2,0.5,1),
+                             breaks   = c(0.05,0.2,1),
+                             labels = format(c(0.05,0.2,1))) +
+      ylab(NULL) +
+      theme_bw() +
+      theme(text = element_text(size=font.size),
+            axis.text.x = element_text(angle = 90)) 
+  }
+}
+```
+
+### Get motif target regions
+
+```{r}
+getTargetRegion <- function(motif,
+                            positions=motifPositions_homer,
+                            query_GR,
+                            peak_annotation){
+  overlap <- findOverlaps(query = positions[[motif]], 
+                          subject = query_GR, 
+                          type = "within")
+  target_region <- peak_annotation[unique(overlap@to),]
+  target_region
+}
+```
+
+
+# -------------------------------------------------------------------------------
+
+## scATAC-seq data analysis using ArchR
+
+Download data from Geo using GEOquery
+
+```{r}
+library("GEOquery")
+```
+
+```{r}
+gse <- getGEO("GSE174072",GSEMatrix=FALSE)
+head(Meta(gse))
+names(GSMList(gse))
+```
+
+```{r}
+for(i in 1:length(GSMList(gse))){
+  print(names(GSMList(gse))[i])
+  print(GSMList(gse)[[i]]@header$library_strategy)
+}
+```
+
+```{r}
+samples <- c("GSM5285728" , "GSM5285729", "GSM5285730", "GSM5285731", "GSM5285732",
+             "GSM5285733", "GSM5285734", "GSM5285735", "GSM5285736", "GSM5285737",
+             "GSM5285738", "GSM5285739", "GSM5285740","GSM5285741", "GSM5285742",
+             "GSM5285743", "GSM5285744", "GSM5285745", "GSM5285746", "GSM5285747",
+             "GSM5285748", "GSM5285749", "GSM5285750", "GSM5285751", "GSM5285752"
+             )
+
+for(i in samples){
+  print(i)
+  getGEOSuppFiles(GEO = i,
+                baseDir = "Wilk_JEM_2021/ATAC",
+                makeDirectory = TRUE)
+}
+```
+
+
+```{r}
+addArchRGenome("hg38")
+```
+
+## Create Arrow files
+
+```{r}
+inputFiles <- dir("Wilk_JEM_2021/ATAC/fragments", full.names = TRUE)
+inputFiles <- inputFiles[grepl("_fragments.tsv.gz$", inputFiles)]
+names <- dir("Wilk_JEM_2021/ATAC/fragments", full.names = FALSE)
+names <- names[grepl("_fragments.tsv.gz$", names)]
+names(inputFiles) <- unlist(lapply(strsplit(names, split = "_"), function(x) x[1]))
+
+inputFiles
+```
+
+```{r}
+ArrowFiles <- createArrowFiles(inputFiles = inputFiles,
+                               sampleNames = names(inputFiles),
+                               addTileMat = TRUE,
+                               addGeneScoreMat = TRUE,
+                               QCDir = "QualityControl_220531/"
+)
+```
+
+
+## Create ArchRProject
+
+```{r}
+proj <- ArchRProject(
+  ArrowFiles = ArrowFiles,
+  outputDirectory = "ArchR_scATAC_Wilk",
+  copyArrows = TRUE
+)
+```
+
+```{r}
+saveArchRProject(ArchRProj = proj, 
+                 outputDirectory = "ArchR_scATAC_Wilk", 
+                 overwrite = FALSE, 
+                 load = TRUE)
+```
+
+Load previous Archr project 
+
+```{r}
+# proj <- loadArchRProject(path = "./ArchR_scATAC_Wilk/", force = FALSE, showLogo = TRUE)
+```
+
+#---
+
+# Filter cells and add meta data
+
+Match cell ids from ArchR project with cell meta information provided on github
+
+```{r}
+sample_match <- data.frame("GSM" = c("GSM5285728" , "GSM5285729", "GSM5285730", "GSM5285731", "GSM5285732",
+                                     "GSM5285733", "GSM5285734", "GSM5285735", "GSM5285736", "GSM5285737",
+                                     "GSM5285738", "GSM5285739", "GSM5285740","GSM5285741", "GSM5285742",
+                                     "GSM5285743", "GSM5285744", "GSM5285745", "GSM5285746", "GSM5285747",
+                                     "GSM5285748", "GSM5285749", "GSM5285750", "GSM5285751", "GSM5285752"),
+                           "Sample"=c("ATAC_055", "ATAC_057", "ATAC_132D0", "ATAC_52", "ATAC_555_1", 
+                                      "ATAC_555_2", "ATAC_556", "ATAC_557", "ATAC_558", "ATAC_559", 
+                                      "ATAC_560", "ATAC_564A", "ATAC_564B", "ATAC_66D0", "ATAC_66D7",  
+                                      "ATAC_67", "ATAC_83", "ATAC_86", "ATAC_EV08", "ATAC_HIP02_frozen", 
+                                      "ATAC_HIP023_frozen", "ATAC_HIP043", "ATAC_HIP044", "ATAC_HIP045", "ATAC_HIP15_frozen"))
+
+proj@cellColData$SampleID <- sample_match$Sample[match(as.character(proj@cellColData$Sample),
+                                                       sample_match$GSM)]
+
+proj@cellColData$Cell_id <- paste(proj@cellColData$SampleID, "#",
+                                  unlist(lapply(strsplit(rownames(proj@cellColData), split = "#"), function(x) x[2])), sep="")
+```
+
+Meta data was downloaded from: https://github.com/ajwilk/COVID_scMultiome/blob/main/data/scATAC/atac_cell_metadata.csv
+```{r}
+meta <- read.csv("atac_cell_metadata.csv", stringsAsFactors = FALSE)
+colnames(meta)
+```
+
+### Filter ArchR project
+
+```{r}
+proj_filt <- proj[proj$cellNames[which(proj$Cell_id %in% meta[!is.na(meta$current_severity_bin),]$cell_id)],]
+proj_filt
+```
+
+### Add meta information
+
+```{r}
+idx <- match(as.character(proj_filt$Cell_id), meta$cell_id)
+
+proj_filt$is_doublet <- meta$is_doublet[idx]
+proj_filt$cell_type <- meta$cell_type[idx]
+proj_filt$current_severity_bin <- meta$current_severity_bin[idx]
+proj_filt$current_severity_bin <- ifelse(is.na(proj_filt$current_severity_bin),"n.d.",proj_filt$current_severity_bin)
+```
+
+We skip the doublet filtering, as we filtered the cells based on the information available in the cell meta annotation of the publication.
+
+#--- 
+
+# Quality Scores
+
+```{r}
+df <- getCellColData(proj_filt, select = c("log10(nFrags)", "TSSEnrichment"))
+
+p <- ggPoint(
+    x = df[,1], 
+    y = df[,2], 
+    colorDensity = TRUE,
+    continuousSet = "sambaNight",
+    xlabel = "Log10 Unique Fragments",
+    ylabel = "TSS Enrichment",
+    xlim = c(log10(500), quantile(df[,1], probs = 0.99)),
+    ylim = c(0, quantile(df[,2], probs = 0.99))
+) + geom_hline(yintercept = 4, lty = "dashed") + geom_vline(xintercept = 3, lty = "dashed")
+
+p
+
+rm(df, p)
+```
+
+### Plots for each sample for the TSS enrichment scores and log10(unique features)
+
+```{r, fig.height=4, fig.width=12}
+proj_filt$group_sample <- paste(proj_filt$current_severity_bin, proj_filt$SampleID)
+
+p1 <- plotGroups(
+    ArchRProj = proj_filt, 
+    groupBy = "group_sample", 
+    colorBy = "cellColData", 
+    name = "TSSEnrichment",
+    plotAs = "ridges"
+   )
+
+p2 <- plotGroups(
+    ArchRProj = proj_filt, 
+    groupBy = "group_sample", 
+    colorBy = "cellColData", 
+    name = "TSSEnrichment",
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE
+   )
+
+p3 <- plotGroups(
+    ArchRProj = proj_filt, 
+    groupBy = "group_sample", 
+    colorBy = "cellColData", 
+    name = "log10(nFrags)",
+    plotAs = "ridges"
+   )
+
+p4 <- plotGroups(
+    ArchRProj = proj_filt, 
+    groupBy = "group_sample", 
+    colorBy = "cellColData", 
+    name = "log10(nFrags)",
+    plotAs = "violin",
+    alpha = 0.4,
+    addBoxPlot = TRUE
+   )
+
+ggAlignPlots(p1, p2, p3, p4, type = "h")
+rm(p1,p2,p3,p4)
+```
+
+### Fragment Size distribution and TSS enrichment
+
+```{r, fig.height3, fig.width=8}
+p1 <- plotFragmentSizes(ArchRProj = proj_filt)
+p2 <- plotTSSEnrichment(ArchRProj = proj_filt,
+                        flank = 10000)
+
+ggAlignPlots(p1,p2, type = "h")
+rm(p1,p2)
+```
+
+#---
+
+# Downstream analyses
+
+## Dimensionality Reduction and Clustering
+
+ArchR implements an iterative LSI dimensionality reduction via the addIterativeLSI() function.
+
+```{r}
+proj_filt <- addIterativeLSI(ArchRProj = proj_filt, useMatrix = "TileMatrix", name = "IterativeLSI")
+```
+
+To call clusters in this reduced dimension sub-space, we use the addClusters() function which uses Seurat’s graph clustering as the default clustering method.
+
+```{r}
+proj_filt <- addClusters(input = proj_filt,
+                         reducedDims = "IterativeLSI",
+                         method = "Seurat",
+                         force = TRUE,
+                         resolution = 0.8)
+```
+
+## Visualizing in a 2D UMAP Embedding
+
+We can visualize our scATAC-seq data using a 2-dimensional representation such as Uniform Manifold Approximation and proj_filtection (UMAP). To do this, we add a UMAP embedding to our ArchRproj_filtect object with the addUMAP() function. This function uses the uwot package to perform UMAP.
+
+```{r}
+proj_filt <- addUMAP(ArchRProj = proj_filt, reducedDims = "IterativeLSI")
+```
+
+Using this UMAP, we can visualize various attributes of our cells which are stored in a matrix called cellColData in our ArchRproj_filtect. To do this, we use the plotEmbedding() function and we specify the variable to use for coloration via a combination of the colorBy and name parameters.
+
+```{r}
+plotEmbedding(ArchRProj = proj_filt, colorBy = "cellColData", 
+              name = "cell_type",
+              embedding = "UMAP", verbose=FALSE)
+```
+
+```{r}
+plotEmbedding(ArchRProj = proj_filt, colorBy = "cellColData", 
+              name = "SampleID", 
+              embedding = "UMAP", 
+              verbose=FALSE)
+```
+
+```{r}
+plotEmbedding(ArchRProj = proj_filt, 
+              colorBy = "cellColData", 
+              name = "current_severity_bin", 
+              pal = c("0"="#4f4d4c",
+                      "1-3" ="#ffb867",
+                      "4-5" = "#5D63A1",
+                      "6-7" = "#982326"),
+              embedding = "UMAP", verbose=FALSE)
+```
+
+#---
+
+# Monocyte-specific analysis
+
+```{r}
+proj_mono<- proj_filt[proj_filt$cellNames[which(proj_filt$cell_type == "CD14 Mono")],]
+
+proj_mono
+```
+
+### Dimensionality reduction
+
+```{r}
+proj_mono <- addIterativeLSI(ArchRProj = proj_mono, useMatrix = "GeneScoreMatrix", name = "IterativeLSI_mono", force = TRUE)
+```
+
+```{r}
+proj_mono <- addUMAP(ArchRProj = proj_mono, reducedDims = "IterativeLSI_mono", name = "UMAP_mono")
+```
+
+```{r}
+plotEmbedding(ArchRProj = proj_mono, colorBy = "cellColData", name = "current_severity_bin", 
+              embedding = "UMAP_mono", verbose=FALSE)
+```
+
+#---
+
+# Visualization of selected cluster marker genes {.tabset}
+
+We add imputation weights using MAGIC to help smooth the dropout noise in our gene scores.
+
+```{r}
+proj_mono <- addImputeWeights(proj_mono)
+```
+
+```{r, fig.width=8, fig.height=3}
+p1 <- plotGroups(
+    ArchRProj = proj_mono,
+    groupBy = "current_severity_bin", 
+    colorBy = "GeneScoreMatrix", 
+    name = "IL15",
+    plotAs = "violin",
+    pal = c("0"="#4f4d4c",
+            "1-3" ="#ffb867",
+            "4-5" = "#5D63A1",
+            "6-7" = "#982326"),
+    alpha = 0.4,
+    addBoxPlot = TRUE
+   )
+
+p2 <- plotGroups(
+    ArchRProj = proj_mono,
+    groupBy = "current_severity_bin", 
+    colorBy = "GeneScoreMatrix", 
+    name = "CD83",
+    plotAs = "violin",
+    pal = c("0"="#4f4d4c",
+            "1-3" ="#ffb867",
+            "4-5" = "#5D63A1",
+            "6-7" = "#982326"),
+    alpha = 0.4,
+    addBoxPlot = TRUE
+   )
+
+p3 <- plotGroups(
+    ArchRProj = proj_mono,
+    groupBy = "current_severity_bin", 
+    colorBy = "GeneScoreMatrix", 
+    name = "CXCL16",
+    plotAs = "violin",
+    pal = c("0"="#4f4d4c",
+            "1-3" ="#ffb867",
+            "4-5" = "#5D63A1",
+            "6-7" = "#982326"),
+    alpha = 0.4,
+    addBoxPlot = TRUE
+   )
+
+p4 <- plotGroups(
+    ArchRProj = proj_mono,
+    groupBy = "current_severity_bin", 
+    colorBy = "GeneScoreMatrix", 
+    name = "TNF",
+    plotAs = "violin",
+    pal = c("0"="#4f4d4c",
+            "1-3" ="#ffb867",
+            "4-5" = "#5D63A1",
+            "6-7" = "#982326"),
+    alpha = 0.4,
+    addBoxPlot = TRUE
+   )
+
+p <- CombinePlots(plots=list(p1,p2,p3,p4),ncol=4)
+
+p
+```
+
+#---
+
+# Gene level analysis
+
+```{r}
+GeneScoreMtx_mono <- getMatrixFromProject(
+  ArchRProj = proj_mono,
+  useMatrix = "GeneScoreMatrix"
+)
+
+present_genes_entrez <- bitr(GeneScoreMtx_mono@elementMetadata$name, 
+                             fromType = "SYMBOL", 
+                             toType="ENTREZID", 
+                             OrgDb=org.Hs.eg.db)$ENTREZID
+```
+
+
+## Infer severity marker genes
+
+```{r}
+severity_markersGS <- getMarkerFeatures(
+  ArchRProj = proj_mono, 
+  useMatrix = "GeneScoreMatrix", 
+  groupBy = "current_severity_bin",
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  testMethod = "wilcoxon"
+)
+
+severity_markerList <- getMarkers(severity_markersGS, cutOff = "FDR <= 0.05 & Log2FC >= 0.58")
+```
+
+### Heatmap of cluster marker genes
+
+```{r}
+heatmapGS <- plotMarkerHeatmap(
+  seMarker = severity_markersGS, 
+  cutOff = "FDR <= 0.01 & Log2FC >= 0.58", 
+  labelMarkers = NULL,
+  transpose = TRUE
+)
+```
+
+
+```{r,fig.height=3.75, fig.width= 4}
+ComplexHeatmap::draw(heatmapGS, heatmap_legend_side = "bot", annotation_legend_side = "bot")
+```
+
+## Pairwise test between treatment groups
+
+### Mild-specific genes
+
+```{r}
+markerGenes_mild <- getMarkerFeatures(
+  ArchRProj = proj_mono, 
+  useMatrix = "GeneScoreMatrix",
+  groupBy = "current_severity_bin",
+  testMethod = "binomial",
+  maxCells=2000,
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "1-3",
+  bgdGroups = "0", 
+  binarize=TRUE
+)
+```
+
+#### Volcano Plot
+
+```{r,fig.width=5,fig.height=4}
+p <- volcano_plot(data=markerGenes_mild,
+                  useGroups="1-3",
+                  labelnum = 20,
+                  name_col = "name",
+                  FDR_cutoff = 0.05,
+                  FC_cutoff = 0.58)
+
+p
+```
+
+#### GSEA
+
+```{r,fig.width=5, fig.height=5}
+markerList_mild <- getMarkers(markerGenes_mild, 
+                             cutOff = "FDR <= 0.05 & abs(Log2FC) >= 0.58")
+
+GSEA_genes_mild <- scGSEA(input = markerList_mild$`1-3`,
+                          pvalueCutoff = 0.1,
+                          qvalueCutoff = 0.1)
+
+dotplotGSEA(x=GSEA_genes_mild$HALLMARKup)
+```
+
+#------------------------------------------------------------------------------
+
+# Peak level analysis
+
+## Pseudobulk of samples
+
+```{r}
+proj_mono <- addGroupCoverages(ArchRProj = proj_mono,
+                               groupBy = "current_severity_bin")
+```
+
+## MACS3 peak calling
+
+
+```{r}
+proj_mono <- addReproduciblePeakSet(
+   ArchRProj = proj_mono,
+   groupBy = "current_severity_bin",
+   reproducibility = "3",
+   pathToMacs2 = "macs3",
+   minCells = 100,
+   verbose=FALSE
+)
+ 
+allPeaks <- getPeakSet(proj_mono)
+```
+
+```{r}
+allPeaks_annotation.df <- cbind(as.data.frame(allPeaks@seqnames),
+                                as.data.frame(allPeaks@ranges),
+                                as.data.frame(allPeaks@elementMetadata@listData))
+colnames(allPeaks_annotation.df)[1] <- "seqnames"
+
+rownames(allPeaks_annotation.df) <- paste(allPeaks_annotation.df$seqnames,
+                                          allPeaks_annotation.df$start,
+                                          allPeaks_annotation.df$end, sep="_")
+```
+
+Add peak matrix to project:
+
+```{r}
+proj_mono <- addPeakMatrix(proj_mono)
+```
+
+### Mild-specific peaks
+
+```{r}
+markerPeaks_mild <- getMarkerFeatures(
+  ArchRProj = proj_mono, 
+  useMatrix = "PeakMatrix",
+  groupBy = "current_severity_bin",
+  testMethod = "binomial",
+  maxCells=2000,
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "1-3",
+  bgdGroups = "0", 
+  binarize=TRUE
+)
+```
+
+```{r}
+markerList_mild_up <- getMarkers(markerPeaks_mild, 
+                                 cutOff = "FDR <= 0.01 & Log2FC >= 2", 
+                                 returnGR = TRUE)
+```
+
+```{r}
+peakAnnotation_markerList_mild_up <- annotatePeak(markerList_mild_up$`1-3`,
+                                              TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                              level="gene", 
+                                              annoDb="org.Hs.eg.db")
+
+peakAnnotation_markerList_mild_up.df <- as.data.frame(as.GRanges(peakAnnotation_markerList_mild_up))
+
+rownames(peakAnnotation_markerList_mild_up.df) <- paste(peakAnnotation_markerList_mild_up.df$seqnames,
+                                                     peakAnnotation_markerList_mild_up.df$start,
+                                                     peakAnnotation_markerList_mild_up.df$end, sep="_")
+```
+
+### Severe-specific peaks
+
+```{r}
+markerPeaks_severe <- getMarkerFeatures(
+  ArchRProj = proj_mono, 
+  useMatrix = "PeakMatrix",
+  groupBy = "current_severity_bin",
+  testMethod = "binomial",
+  maxCells=2000,
+  bias = c("TSSEnrichment", "log10(nFrags)"),
+  useGroups = "6-7",
+  bgdGroups = "0", 
+  binarize=TRUE
+)
+```
+
+```{r}
+markerList_severe_up <- getMarkers(markerPeaks_severe, 
+                                 cutOff = "FDR <= 0.01 & Log2FC >= 2", 
+                                 returnGR = TRUE)
+```
+
+```{r}
+peakAnnotation_markerList_severe_up <- annotatePeak(markerList_severe_up$`6-7`,
+                                              TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                              level="gene", 
+                                              annoDb="org.Hs.eg.db")
+
+peakAnnotation_markerList_severe_up.df <- as.data.frame(as.GRanges(peakAnnotation_markerList_severe_up))
+
+rownames(peakAnnotation_markerList_severe_up.df) <- paste(peakAnnotation_markerList_severe_up.df$seqnames,
+                                                     peakAnnotation_markerList_severe_up.df$start,
+                                                     peakAnnotation_markerList_severe_up.df$end, sep="_")
+```
+
+
+# ----------------------------------------------------
+
+# ArchR TF binding motif enrichment analysis
+
+```{r}
+proj_mono <- addMotifAnnotations(ArchRProj = proj_mono, motifSet = "homer", name = "Motif_homer",force=TRUE)
+```
+
+```{r}
+motifPositions_homer <- getPositions(proj_mono, 
+                                     name = "Motif_homer")
+
+motifPositions_homer
+```
+
+## Mild COVID19 OPEN DAR
+
+### HOMER Motif Analysis
+
+```{r}
+motifsUp_mild <- peakAnnoEnrichment(
+    seMarker = markerPeaks_mild,
+    ArchRProj = proj_mono,
+    background = "all",
+    peakAnnotation = "Motif_homer",
+    cutOff = "FDR <= 0.01 & Log2FC >= 2"
+  )
+
+
+motifsUp_mild_homer <- data.frame(TF = rownames(motifsUp_mild), mlog10Padj = assay(motifsUp_mild)[,1])
+motifsUp_mild_homer <- motifsUp_mild_homer[order(motifsUp_mild_homer$mlog10Padj, decreasing = TRUE),]
+motifsUp_mild_homer$rank <- as.numeric(seq_len(nrow(motifsUp_mild_homer)))
+```
+
+```{r}
+target_list <- list()
+for(i in motifsUp_mild_homer$TF){
+  print(i)
+  tmp  <- getTargetRegion(motif=i,
+                          positions=motifPositions_homer,
+                          query_GR=getMarkers(markerPeaks_mild, 
+                                              cutOff = "FDR <= 0.01 & Log2FC >= 2", 
+                                              returnGR = TRUE)$`1-3`,
+                          peak_annotation=peakAnnotation_markerList_mild_up.df)
+  target_list[[paste(i)]] <- tmp
+  #target_list[[paste(i)]] <- tmp[abs(tmp$distanceToTSS) < 10000,]
+}
+
+motifsUp_mild_homer$n_targets <- sapply(target_list, nrow)
+
+motifsUp_mild_homer <- motifsUp_mild_homer[order(motifsUp_mild_homer$n_targets, decreasing = TRUE),]
+motifsUp_mild_homer$nrank <- as.numeric(seq_len(nrow(motifsUp_mild_homer)))
+```
+
+
+```{r, fig.width=12, fig.height=12}
+tmp <- motifsUp_mild_homer[order(motifsUp_mild_homer$rank, decreasing = FALSE),]
+top50_rank <- tmp[c(1:50),]
+
+p1 <- ggplot(top50_rank, aes(x = rank, y = mlog10Padj, color = mlog10Padj, size= n_targets)) + 
+  geom_point() +
+  scale_y_continuous(limits=c(0,270))+
+  ggrepel::geom_text_repel(
+        data = top50_rank, 
+        aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 2,
+        force_pull   = 0, # do not pull toward data points
+        nudge_y      = 0.05,
+        direction    = "x",
+        angle        = 90,
+        hjust        = -0.5,
+        segment.size = 0.2,
+        max.iter = 1e4, max.time = 1,
+        color = "black",
+        max.overlaps = Inf
+  ) + 
+  theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("p-value Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))+
+  ggtitle("mild (homer motifs)")
+
+tmp <- motifsUp_mild_homer[order(motifsUp_mild_homer$nrank),]
+top50_nrank <- tmp[c(1:50),]
+
+p2 <- ggplot(top50_nrank, aes(x = nrank, y = n_targets, color = mlog10Padj, size= n_targets)) + 
+  geom_point() +
+  scale_y_continuous(limits=c(0,1200))+
+  ggrepel::geom_text_repel(
+        data = top50_nrank, 
+        aes(x = nrank, y = n_targets, label = TF), 
+        size = 2,
+        force_pull   = 0, # do not pull toward data points
+        nudge_y      = 0.05,
+        direction    = "x",
+        angle        = 90,
+        hjust        = -0.5,
+        segment.size = 0.2,
+        max.iter = 1e4, max.time = 1,
+        color = "black",
+        max.overlaps = Inf
+  ) + theme_ArchR() + 
+  ylab("Number of target regions") + 
+  xlab("n target Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))+
+  ggtitle("mild (homer motifs)")
+
+p1/p2
+```
+
+### Upset Plot of target regions of key motifs
+
+```{r,fig.width=8,fig.height=4}
+target_regions_list <- list("Fra1.bZIP_98" = rownames(target_list[["Fra1.bZIP_98"]]),
+                    "Fosl2.bZIP_86" = rownames(target_list[["Fosl2.bZIP_86"]]),
+                    "Atf3.bZIP_12" = rownames(target_list[["Atf3.bZIP_12"]]),
+                    "Fra2.bZIP_99" =rownames(target_list[["Fra2.bZIP_99"]]),
+                    "Jun.AP1.bZIP_141" = rownames(target_list[["Jun.AP1.bZIP_141"]]),
+                    "AP.1.bZIP_1" = rownames(target_list[["AP.1.bZIP_1"]]),
+                    "BATF.bZIP_20" = rownames(target_list[["BATF.bZIP_20"]]),
+                    "Bach2.bZIP_17" = rownames(target_list[["Bach2.bZIP_17"]]),
+                    "Bach1.bZIP_16" = rownames(target_list[["Bach1.bZIP_16"]]),
+                    "NF.E2.bZIP_179" = rownames(target_list[["NF.E2.bZIP_179"]]),
+                    "IRF1.IRF_136" = rownames(target_list[["IRF1.IRF_136"]]),
+                    "IRF.BATF.IRF.bZIP_19" = rownames(target_list[["IRF.BATF.IRF.bZIP_19"]]),
+                    "NFkB.p65.Rel.RHD_180" = rownames(target_list[["NFkB.p65.Rel.RHD_180"]])
+                    )
+
+p <- upset(fromList(target_regions_list), order.by = "freq", nsets = 13, mb.ratio = c(0.4, 0.6))
+p
+```
+
+## Severe COVID19 OPEN DAR
+
+### HOMER Motif Analysis
+
+```{r}
+motifsUp_severe <- peakAnnoEnrichment(
+    seMarker = markerPeaks_severe,
+    ArchRProj = proj_mono,
+    background = "all",
+    peakAnnotation = "Motif_homer",
+    cutOff = "FDR <= 0.01 & Log2FC >= 2"
+  )
+
+
+motifsUp_severe_homer <- data.frame(TF = rownames(motifsUp_severe), mlog10Padj = assay(motifsUp_severe)[,1])
+motifsUp_severe_homer <- motifsUp_severe_homer[order(motifsUp_severe_homer$mlog10Padj, decreasing = TRUE),]
+motifsUp_severe_homer$rank <- as.numeric(seq_len(nrow(motifsUp_severe_homer)))
+```
+
+```{r}
+target_list_severe <- list()
+for(i in motifsUp_severe_homer$TF){
+  print(i)
+  tmp  <- getTargetRegion(motif=i,
+                          positions=motifPositions_homer,
+                          query_GR=getMarkers(markerPeaks_severe, 
+                                              cutOff = "FDR <= 0.01 & Log2FC >= 2", 
+                                              returnGR = TRUE)$`6-7`,
+                          peak_annotation=peakAnnotation_markerList_severe_up.df)
+  target_list_severe[[paste(i)]] <- tmp
+  #target_list_severe[[paste(i)]] <- tmp[abs(tmp$distanceToTSS) < 10000,]
+}
+
+motifsUp_severe_homer$n_targets <- sapply(target_list_severe, nrow)
+
+motifsUp_severe_homer <- motifsUp_severe_homer[order(motifsUp_severe_homer$n_targets, decreasing = TRUE),]
+motifsUp_severe_homer$nrank <- as.numeric(seq_len(nrow(motifsUp_severe_homer)))
+```
+
+
+```{r, fig.width=12, fig.height=12}
+tmp <- motifsUp_severe_homer[order(motifsUp_severe_homer$rank, decreasing = FALSE),]
+top50_rank <- tmp[c(1:50),]
+
+p1 <- ggplot(top50_rank, aes(x = rank, y = mlog10Padj, color = mlog10Padj, size= n_targets)) + 
+  geom_point() +
+  scale_y_continuous(limits=c(0,270))+
+  ggrepel::geom_text_repel(
+        data = top50_rank, 
+        aes(x = rank, y = mlog10Padj, label = TF), 
+        size = 2,
+        force_pull   = 0, # do not pull toward data points
+        nudge_y      = 0.05,
+        direction    = "x",
+        angle        = 90,
+        hjust        = -0.5,
+        segment.size = 0.2,
+        max.iter = 1e4, max.time = 1,
+        color = "black",
+        max.overlaps = Inf
+  ) + 
+  theme_ArchR() + 
+  ylab("-log10(P-adj) Motif Enrichment") + 
+  xlab("p-value Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))+
+  ggtitle("severe (homer motifs)")
+
+tmp <- motifsUp_severe_homer[order(motifsUp_severe_homer$nrank),]
+top50_nrank <- tmp[c(1:50),]
+
+p2 <- ggplot(top50_nrank, aes(x = nrank, y = n_targets, color = mlog10Padj, size= n_targets)) + 
+  geom_point() +
+  scale_y_continuous(limits=c(0,1200))+
+  ggrepel::geom_text_repel(
+        data = top50_nrank, 
+        aes(x = nrank, y = n_targets, label = TF), 
+        size = 2,
+        force_pull   = 0, # do not pull toward data points
+        nudge_y      = 0.05,
+        direction    = "x",
+        angle        = 90,
+        hjust        = -0.5,
+        segment.size = 0.2,
+        max.iter = 1e4, max.time = 1,
+        color = "black",
+        max.overlaps = Inf
+  ) + theme_ArchR() + 
+  ylab("Number of target regions") + 
+  xlab("n target Rank Sorted TFs Enriched") +
+  scale_color_gradientn(colors = paletteContinuous(set = "comet"))+
+  ggtitle("severe (homer motifs)")
+
+p1/p2
+```
+
+### Upset Plot of target regions of key motifs
+
+```{r}
+target_regions_list_severe <- list("Fra1.bZIP_98" = rownames(target_list_severe[["Fra1.bZIP_98"]]),
+                                   "Fra2.bZIP_99" =rownames(target_list_severe[["Fra2.bZIP_99"]]),
+                                   "Fosl2.bZIP_86" = rownames(target_list_severe[["Fosl2.bZIP_86"]]),
+                                   "Atf3.bZIP_12" = rownames(target_list_severe[["Atf3.bZIP_12"]]),
+                                   "AP.1.bZIP_1" = rownames(target_list_severe[["AP.1.bZIP_1"]]),
+                                   "BATF.bZIP_20" = rownames(target_list_severe[["BATF.bZIP_20"]]),
+                                   "Jun.AP1.bZIP_141" = rownames(target_list_severe[["Jun.AP1.bZIP_141"]]),
+                                   "Bach2.bZIP_17" = rownames(target_list_severe[["Bach2.bZIP_17"]]),
+                                   "Bach1.bZIP_16" = rownames(target_list_severe[["Bach1.bZIP_16"]]),
+                                   "NF.E2.bZIP_179" = rownames(target_list_severe[["NF.E2.bZIP_179"]]),
+                                   "IRF1.IRF_136" = rownames(target_list_severe[["IRF1.IRF_136"]]),
+                                   "IRF.BATF.IRF.bZIP_19" = rownames(target_list_severe[["IRF.BATF.IRF.bZIP_19"]]),
+                                   "NFkB.p65.Rel.RHD_180" = rownames(target_list_severe[["NFkB.p65.Rel.RHD_180"]])
+)
+
+p <- upset(fromList(target_regions_list_severe), order.by = "freq", nsets = 13, mb.ratio = c(0.4, 0.6))
+p
+```
+
+# ----------------------------------------------------
+
+# Clean up
+
+```{r}
+Sys.Date()
+sessionInfo()
+```
