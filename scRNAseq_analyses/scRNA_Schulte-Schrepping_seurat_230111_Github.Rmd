@@ -1,5 +1,5 @@
 ---
-title: "Analysis of CD40 signalling in combination with IFN in myeloid cells in COVID-19"
+title: "Analysis for Gressier et al., 2022"
 author: "Jonas Schulte-Schrepping"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: 
@@ -26,9 +26,6 @@ output:
 # install.packages("dunn.test")
 # install.packages("tidydr")
 # devtools::install_version("RcisTarget", version="1.10.0",
-#                           repos=c("https://bioconductor.org/packages/3.12/bioc","http://cran.us.r-project.org"),
-#                           upgrade = "never", force = TRUE)
-# devtools::install_version("RcisTarget", version="1.38.2",
 #                           repos=c("https://bioconductor.org/packages/3.12/bioc","http://cran.us.r-project.org"),
 #                           upgrade = "never", force = TRUE)
 # devtools::install_version("AUCell", version="1.12.0",
@@ -70,6 +67,7 @@ library(doRNG)
 library(GSVA)
 library(fgsea)
 ```
+
 ## Settings for parallel computing
 ```{r}
 set.seed(42)
@@ -114,16 +112,9 @@ color_group_chua <- c("control"="#4F4D4C",
                  "moderate" = "#5D63A1"
 )
 
-color_severity_arunachalam <- c("Control"="#4F4D4C",
+color_group_arunachalam <- c("Control"="#4F4D4C",
                  "Severe" = "#982326",
                  "Moderate" = "#5D63A1"
-)
-
-color_grouptime_arunachalam <- c("Control_Control"="#4F4D4C",
-                                 "Moderate_early" = "#A09DC6",
-                                 "Moderate_late" = "#5D63A1",
-                                 "Severe_early" = "#CD9C8B",
-                                 "Severe_late" = "#982326"
 )
 ```
 
@@ -325,6 +316,7 @@ ratio_plot <- function(x,
 ```
 
 ## FeatureBoxPlot
+Credit Aaron Wilk, https://github.com/ajwilk/COVID_scMultiome
 
 ```{r}
 FeatureBoxPlot <- function(seu, by = "features", 
@@ -422,57 +414,68 @@ FeatureBoxPlot <- function(seu, by = "features",
 
 ## Load gene set annotation
 
+BioMart Archives
+
 ```{r}
 # transpose gene names to human symbols
 human = useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
 mouse = useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
 ```
 
-```{r}
-hallmark_genes <- clusterProfiler::read.gmt("h.all.v7.3.symbols.gmt")
-motif_genes <- clusterProfiler::read.gmt("c3.tft.v7.3.symbols.gmt")
-```
+MSigDB Hallmark DataSet
 
 ```{r}
-motifRankings_500bp <- importRankings("hg38__refseq-r80__500bp_up_and_100bp_down_tss.mc9nr.feather")
+hallmark_genes <- clusterProfiler::read.gmt("h.all.v7.3.symbols.gmt")
+```
+
+Rcistarget motif Database
+
+```{r}
 motifRankings_10kb <- importRankings("hg38__refseq-r80__10kb_up_and_down_tss.mc9nr.feather")
 data(motifAnnotations_hgnc)
 ```
 
-Load seurat PBMC reference
+Load Seurat PBMC reference data from https://doi.org/10.1016/j.cell.2021.04.048
 
 ```{r, fig.width=21, fig.height=6}
 reference <- LoadH5Seurat("pbmc_multimodal.h5seurat")
 ```
+
 
 #-------------------------------------------------------------------------------
 
 # Load and process DE gene sets from bulk RNA-seq experiments
 
 ```{r}
-DE_genes <- read.csv("murine_gene_signatures/Mouse_DEG_Signatures_EG.csv")
-DE_genes
+# DE_genes <- read.csv("signatures/Mouse_DEG_Signatures_EG.csv")
+# DE_genes
 ```
 
 ```{r}
-sig_list<-as.list(DE_genes)
-
-for(i in 1:length(sig_list)){
-  x <- as.character(unique(sig_list[[i]]))[!as.character(unique(sig_list[[i]])) == ""]
-  sig_list[[i]] <- getLDS(attributes = c("mgi_symbol"), 
-                          filters = "mgi_symbol", 
-                          values = x , 
-                          mart = mouse, 
-                          attributesL = c("hgnc_symbol"), 
-                          martL = human, uniqueRows=T)[, 2]
-}
+# sig_list<-as.list(DE_genes)
+# 
+# for(i in 1:length(sig_list)){
+#   x <- as.character(unique(sig_list[[i]]))[!as.character(unique(sig_list[[i]])) == ""]
+#   sig_list[[i]] <- getLDS(attributes = c("mgi_symbol"), 
+#                           filters = "mgi_symbol", 
+#                           values = x , 
+#                           mart = mouse, 
+#                           attributesL = c("hgnc_symbol"), 
+#                           martL = human, 
+#                           uniqueRows=T)[, 2]
+# }
+# 
+# lengths(sig_list)
+# 
+# save(sig_list, file = "analysis_output/Mouse_DEG_Signatures_EG_human.RDS")
+load("analysis_output/Mouse_DEG_Signatures_EG_human.RDS")
 ```
 
 ```{r}
 sig_list_compressed <- list("IFN_only"=sig_list$IFN_only,
                             "Amplified"=c(sig_list$Amplified_15min,
-                                        sig_list$Amplified_30min,
-                                        sig_list$Amplified_4h),
+                                          sig_list$Amplified_30min,
+                                          sig_list$Amplified_4h),
                             "DoubleTrigger"=c(sig_list$doubletrigger_15min,
                                               sig_list$doubletrigger_30min,
                                               sig_list$doubletrigger_4h),
@@ -481,16 +484,23 @@ sig_list_compressed <- list("IFN_only"=sig_list$IFN_only,
 
 
 ```{r}
-interferome_myeloid_list_top200 <- c("Cxcl10","Ifit2","Cd69","Gbp3","Gbp5","Ccl12","Mx1","Rsad2","Cmpk2","Cxcl9","Serpina3g","Oasl1","Usp18","Gbp2","Tnfsf10","Mx2","I830012O16Rik","Tgtp2","Isg20","Ifi205","Serpina3f","Mmp13","Gbp7","Fam26f","AA467197","Cd274","Nt5c3","Ifi47","Phf11a","Pou3f1","Isg15","Phf11d","Gm14446","Batf2","Igtp","Slfn1","Ccl2","Enpp4","Ifit3","Cd40","Irgm2","Ch25h","Ifi204","Irf7","Fgl2","BC094916","Il10","Daxx","Ddx58","Pydc3","Hdc","Zbp1","Fcgr4","Stat2","Pydc4","Irgm1","Ccnd2","Dhx58","Nod1","Ccl4","Aldh1b1","Setdb2","Parp12","Il15","Themis2","Scimp","Apol9b","Tor3a","Ppm1k","Sp140","Pnp","Pml","Helz2","Ifih1","Mlkl","Ccl8","Il15ra","Irg1","Trim21","Eif2ak2","Ifi44","Oasl2","Tap1","Ifit1","Ccl7","Il1rn","Ccrl2","Ddx60","Hap1","Gadd45g","Papd7","Arhgef3","Fcgr1","Gm4955","Tpst1","BC147527","P2ry14","Iigp1","Xaf1","Ifi35","Samhd1","Gm4951","Pnp2","Glipr2","Atrip","Gnb4","Mndal","H2-T22","Mov10","Stat1","Peli1","Gm5431","Lgals9","Trafd1","Oas1a","Casp4","Oas3","Upp1","P2ry13","Plekhf2","Ly6a","Parp14","March5","Dusp28","5031414D18Rik","Ube2l6","Irf1","Spsb1","Trim30d","Slamf8","Herc6","Lhx2","Oas1b","Slc28a2","Tlr3","Pcgf5","Jak2","Ifi203","Uaca","Asb13","Atp10a","H2-T10","Socs3","Sp100","Mitd1","Socs1","Sertad3","Usb1","Nampt","Rmdn3","Itpr1","Gch1","Ccl5","Ppa1","Naa25","Gcnt2","Pyhin1","Kif5c","Rgl1","Car13","Trim30b","Dennd6b","Sgcb","Pdk3","Dtx3l","Armcx6","Apobec3","Adar","Tmem171","Csrnp1","Slco3a1","Prm1","Cd86","Il18","Fbrsl1","Carhsp1","Tor1aip1","Prkx","Mnda","Epsti1","Rin2","Oas2","Flt1","Arel1","Tdrd7","Dck","Aida","B430306N03Rik","Golga3","Mxd1","Slfn5","Zyx","Gvin1","Psmb10","Gca","Klrk1","Parp10","Tmem2","Trim30a","Il27")
+# interferome_myeloid_list_top200 <- c("Cxcl10","Ifit2","Cd69","Gbp3","Gbp5","Ccl12","Mx1","Rsad2","Cmpk2","Cxcl9","Serpina3g","Oasl1","Usp18","Gbp2","Tnfsf10","Mx2","I830012O16Rik","Tgtp2","Isg20","Ifi205","Serpina3f","Mmp13","Gbp7","Fam26f","AA467197","Cd274","Nt5c3","Ifi47","Phf11a","Pou3f1","Isg15","Phf11d","Gm14446","Batf2","Igtp","Slfn1","Ccl2","Enpp4","Ifit3","Cd40","Irgm2","Ch25h","Ifi204","Irf7","Fgl2","BC094916","Il10","Daxx","Ddx58","Pydc3","Hdc","Zbp1","Fcgr4","Stat2","Pydc4","Irgm1","Ccnd2","Dhx58","Nod1","Ccl4","Aldh1b1","Setdb2","Parp12","Il15","Themis2","Scimp","Apol9b","Tor3a","Ppm1k","Sp140","Pnp","Pml","Helz2","Ifih1","Mlkl","Ccl8","Il15ra","Irg1","Trim21","Eif2ak2","Ifi44","Oasl2","Tap1","Ifit1","Ccl7","Il1rn","Ccrl2","Ddx60","Hap1","Gadd45g","Papd7","Arhgef3","Fcgr1","Gm4955","Tpst1","BC147527","P2ry14","Iigp1","Xaf1","Ifi35","Samhd1","Gm4951","Pnp2","Glipr2","Atrip","Gnb4","Mndal","H2-T22","Mov10","Stat1","Peli1","Gm5431","Lgals9","Trafd1","Oas1a","Casp4","Oas3","Upp1","P2ry13","Plekhf2","Ly6a","Parp14","March5","Dusp28","5031414D18Rik","Ube2l6","Irf1","Spsb1","Trim30d","Slamf8","Herc6","Lhx2","Oas1b","Slc28a2","Tlr3","Pcgf5","Jak2","Ifi203","Uaca","Asb13","Atp10a","H2-T10","Socs3","Sp100","Mitd1","Socs1","Sertad3","Usb1","Nampt","Rmdn3","Itpr1","Gch1","Ccl5","Ppa1","Naa25","Gcnt2","Pyhin1","Kif5c","Rgl1","Car13","Trim30b","Dennd6b","Sgcb","Pdk3","Dtx3l","Armcx6","Apobec3","Adar","Tmem171","Csrnp1","Slco3a1","Prm1","Cd86","Il18","Fbrsl1","Carhsp1","Tor1aip1","Prkx","Mnda","Epsti1","Rin2","Oas2","Flt1","Arel1","Tdrd7","Dck","Aida","B430306N03Rik","Golga3","Mxd1","Slfn5","Zyx","Gvin1","Psmb10","Gca","Klrk1","Parp10","Tmem2","Trim30a","Il27")
+# 
+# interferome_myeloid_list_top200_human <- unique(getLDS(attributes = c("mgi_symbol"), 
+#                                                        filters = "mgi_symbol", 
+#                                                        values = interferome_myeloid_list_top200, 
+#                                                        mart = mouse, 
+#                                                        attributesL = c("hgnc_symbol"), 
+#                                                        martL = human, 
+#                                                        uniqueRows=T)[, 2])
+# 
+# 
+# save(interferome_myeloid_list_top200_human, file = "analysis_output/Interferome_myeloid_list_top200_human.RDS")
+load("analysis_output/Interferome_myeloid_list_top200_human.RDS")
+```
 
-interferome_myeloid_list_top200_human <- unique(getLDS(attributes = c("mgi_symbol"), 
-                                                       filters = "mgi_symbol", 
-                                                       values = interferome_myeloid_list_top200, 
-                                                       mart = mouse, 
-                                                       attributesL = c("hgnc_symbol"), 
-                                                       martL = human, 
-                                                       uniqueRows=T)[, 2])
 
+```{r}
 interferome_myeloid_intersect <- sig_list_compressed$IFN_only[sig_list_compressed$IFN_only %in% interferome_myeloid_list_top200_human[1:100]]
 
 list_compressedIFN <- list("IFN"=interferome_myeloid_intersect,
@@ -499,34 +509,45 @@ list_compressedIFN <- list("IFN"=interferome_myeloid_intersect,
                            "CD40_down"=sig_list_compressed$CD40_down)
 ```
 
+
+
 # Helped and unhelped T cell signatures
 
 Table derived from https://www.sciencedirect.com/science/article/pii/S1074761317304636?via%3Dihub & GSE89665
 
 ```{r}
-Tcell_sig_list <- list()
+# Tcell_sig_list <- list()
+# 
+# Tcell_sig1 <- read.delim("signatures/COMP3_DE_Table.txt",
+#                          stringsAsFactors = F)
+# Tcell_sig1 <- Tcell_sig1[,!grepl("description", colnames(Tcell_sig1))]
+# 
+# Tcell_sig_list[['Tcell_sig1_helped']] <- as.character(Tcell_sig1[Tcell_sig1$logFC < -1 & Tcell_sig1$FDR < 0.1,]$mgi)
+# Tcell_sig_list[['Tcell_sig1_unhelped']] <- as.character(Tcell_sig1[Tcell_sig1$logFC > 1 & Tcell_sig1$FDR < 0.1,]$mgi)
+# 
+# for(i in 1:length(Tcell_sig_list)){
+#   x <- as.character(unique(Tcell_sig_list[[i]]))
+#   print(head(x))
+#   Tcell_sig_list[[i]] <- unique(getLDS(attributes = c("mgi_symbol"),
+#                           filters = "mgi_symbol",
+#                           values = x ,
+#                           mart = mouse,
+#                           attributesL = c("hgnc_symbol"),
+#                           martL = human,
+#                           uniqueRows=T)[, 2])
+# }
+# 
+# save(Tcell_sig_list, file = "analysis_output/T_cell_signatures_Ahrends_human.RDS")
+load("analysis_output/T_cell_signatures_Ahrends_human.RDS")
 
-Tcell_sig1 <- read.delim("COMP3_DE_Table.txt",
-                         stringsAsFactors = F)
-Tcell_sig1 <- Tcell_sig1[,!grepl("description", colnames(Tcell_sig1))]
-
-Tcell_sig_list[['Tcell_sig1_helped']] <- as.character(Tcell_sig1[Tcell_sig1$logFC < -1 & Tcell_sig1$FDR < 0.1,]$mgi)
-Tcell_sig_list[['Tcell_sig1_unhelped']] <- as.character(Tcell_sig1[Tcell_sig1$logFC > 1 & Tcell_sig1$FDR < 0.1,]$mgi)
-
-for(i in 1:length(Tcell_sig_list)){
-  x <- as.character(unique(Tcell_sig_list[[i]]))
-  print(head(x))
-  Tcell_sig_list[[i]] <- unique(getLDS(attributes = c("mgi_symbol"), 
-                          filters = "mgi_symbol", 
-                          values = x , 
-                          mart = mouse, 
-                          attributesL = c("hgnc_symbol"), 
-                          martL = human, 
-                          uniqueRows=T)[, 2])
-}
-
-lengths(Tcell_sig_list)
+Tcell_sig_list
 ```
+
+```{r}
+stop("stop")
+```
+
+#-------------------------------------------------------------------------------
 
 #-------------------------------------------------------------------------------
 
@@ -543,6 +564,7 @@ seurat_schulte_cohort2_pbmc <- readRDS("seurat_COVID19_PBMC_cohort2_rhapsody_jon
 ```{r}
 df <- unique(seurat_schulte_cohort2_pbmc@meta.data[,c("who_per_sample", "donor","group_per_sample","disease_stage","days_after_onset")])
 table(df$group_per_sample,df$who_per_sample)
+
 rm(df)
 ```
 
@@ -550,10 +572,14 @@ Re-stratify COVID-19 samples by WHO ordinal scale
 
 ```{r}
 seurat_schulte_cohort2_pbmc$disease_severity <- ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(3),"mild (3)", 
-                                               ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(4,5), "moderate (4-5)",
-                                                      ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(7), "severe (7)",
-                                                             ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(0), "control",
-                                                                    "error"))))
+                                                       ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(4,5), "moderate (4-5)",
+                                                              ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(7), "severe (7)",
+                                                                     ifelse(as.character(seurat_schulte_cohort2_pbmc$who_per_sample) %in% c(0), "control",
+                                                                            "error"))))
+```
+
+```{r}
+seurat_cohort2_PBMC$group_time <- paste(seurat_cohort2_PBMC$group_per_sample, seurat_cohort2_PBMC$disease_stage, sep="_")
 ```
 
 ```{r, fig.width=7, fig.height=6}
@@ -561,24 +587,23 @@ seurat_schulte_cohort2_pbmc$disease_severity <- ifelse(as.character(seurat_schul
               reduction = 'umap',
               label = FALSE,
               group.by = "disease_severity")+
-  scale_color_manual(values = color_group_schulte)
+  scale_color_manual(values = c("control"="#4f4d4c",
+                         "mild (3)" ="#ffb867",
+                         "moderate (4-5)" = "#5D63A1",
+                         "severe (7)" = "#982326"))
 ```
 
 ### Define cell groups
 
 ```{r}
 seurat_schulte_cohort2_pbmc$cell_group <- as.character(ifelse(seurat_schulte_cohort2_pbmc$cluster_labels_res.0.4 %in% c("Classical Monocytes",
-                                                                                                        "HLA-DRhi CD83hi Monocytes",
-                                                                                                        "HLA-DRlo CD163hi Monocytes", 
-                                                                                                        "HLA-DRlo S100Ahi Monocytes"),
-                                                      "Classical Monocytes",
-                                                      as.character(seurat_schulte_cohort2_pbmc$cluster_labels_res.0.4)))
-cell_groups <- c("mDC","pDC",
-                 "Classical Monocytes", "Non-classical Monocytes", 
-                 "Neutrophils", "Immature Neutrophils")
-
-seurat_schulte_cohort2_pbmc$group_time <- paste(seurat_schulte_cohort2_pbmc$group_per_sample, seurat_schulte_cohort2_pbmc$disease_stage, sep="_")
+                                                                                                                        "HLA-DRhi CD83hi Monocytes",
+                                                                                                                        "HLA-DRlo CD163hi Monocytes", 
+                                                                                                                        "HLA-DRlo S100Ahi Monocytes"),
+                                                              "Classical Monocytes",
+                                                              as.character(seurat_schulte_cohort2_pbmc$cluster_labels_res.0.4)))
 ```
+
 
 ```{r,fig,width=8, fig.height=6}
 DimPlot(object = seurat_schulte_cohort2_pbmc,
@@ -592,16 +617,21 @@ DimPlot(object = seurat_schulte_cohort2_pbmc,
 
 Build cell ranking
 ```{r}
-tmp1 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,1:40000])
-tmp2 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,40001:80000])
-tmp3 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,80001:ncol(seurat_schulte_cohort2_pbmc@assays$RNA@data)])
+# tmp1 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,1:40000])
+# tmp2 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,40001:80000])
+# tmp3 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,80001:ncol(seurat_schulte_cohort2_pbmc@assays$RNA@data)])
+# 
+# tmp <- do.call(cbind,list(tmp1, tmp2,tmp3))
+# 
+# rSum<-rowSums(tmp)
+# keep<-names(rSum[rSum>10])
+# tmp <- tmp[row.names(tmp) %in% keep,]
+# cells_rankings <- AUCell_buildRankings(as.matrix(tmp), verbose = TRUE, nCores=2)
+# save(cells_rankings, file = "analysis_output/20230111_aucell_ranking_schulte_cohort2_PBMC.Robj")
+```
 
-tmp <- do.call(cbind,list(tmp1, tmp2,tmp3))
-
-rSum<-rowSums(tmp)
-keep<-names(rSum[rSum>10])
-tmp <- tmp[row.names(tmp) %in% keep,]
-cells_rankings <- AUCell_buildRankings(as.matrix(tmp), verbose = TRUE, nCores=2)
+```{r}
+load("analysis_output/20230111_aucell_ranking_schulte_cohort2_PBMC.Robj")
 ```
 
 #-------------------------------------------------------------------------------
@@ -996,7 +1026,7 @@ pheatmap::pheatmap(
 
 #### Dotplot of selected key genes
 ```{r, fig.width=5, fig.height=10}
-p <- DotPlot(subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset = cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE),
+p <- DotPlot(seurat_schulte_cohort2_CD8_filtVarFeatures,
         group.by = "cluster_labels_res.0.4",
         features = c("SELL","IL7R","CD69","FOSL2","KLRG1","KLRB1","GZMK","GZMB","ZEB2","JUNB","JUND","CXCR4","DUSP1","DUSP2","CX3CR1","ISG15","IFIT3"),col.max = 1, col.min = -1, dot.scale = 8)+
   scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
@@ -1006,13 +1036,22 @@ p <- DotPlot(subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset = cluster
 p
 ```
 
-## AUCell Enrichment analysis with cluster resoluition 
+## AUCell Enrichment analysis with cluster resoluition (Figure 6E)
+
+```{r}
+tmp <- as.matrix(seurat_schulte_cohort2_CD8_filtVarFeatures@assays$RNA@data)
+
+rSum<-rowSums(tmp)
+keep<-names(rSum[rSum>10])
+tmp <- tmp[row.names(tmp) %in% keep,]
+cells_rankings_cohort2_CD8 <- AUCell_buildRankings(as.matrix(tmp), verbose = TRUE, nCores=4)
+```
 
 ```{r}
 # Calculate AUC scores
 cells_AUC_Tcell_help <- AUCell_calcAUC(Tcell_sig_list, 
-                                       cells_rankings, 
-                                       aucMaxRank = ceiling(0.03 * nrow(cells_rankings)), 
+                                       cells_rankings_cohort2_CD8, 
+                                       aucMaxRank = ceiling(0.03 * nrow(cells_rankings_cohort2_CD8)), 
                                        normAUC = T)
 ```
 
@@ -1028,7 +1067,7 @@ df <- data.frame(row.names = row.names(seurat_schulte_cohort2_CD8_filtVarFeature
 #Merge two annot columns
 df <- as.data.frame(merge(df, tmp, by = 0))
 
-df <- df[df$Row.names %in% Cells(seurat_schulte_cohort2_CD8),]
+df <- df[df$Row.names %in% Cells(seurat_schulte_cohort2_CD8_filtVarFeatures),]
 
 df.melt <- reshape2::melt(df)
 
@@ -1128,14 +1167,19 @@ kw_dunns
 ```{r}
 table(subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset= cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE)$disease_severity)
 ```
+
 ## UMAP of CD8+ T cells across disease severity (Figure 6A)
 ```{r, fig.width=12, fig.height=4}
 p <- DimPlot(object = subset(seurat_schulte_cohort2_CD8_filtVarFeatures, subset= cluster_labels_res.0.4 == "6: gd Tcells (TRDC+)", invert=TRUE), 
-        reduction = 'umap', 
-        label = FALSE, 
-        group.by = "disease_severity",split.by = "disease_severity",ncol=5,pt.size = 0.5
-        ) +
-    scale_color_manual(values = color_group_schulte)+ NoLegend()
+             reduction = 'umap', 
+             label = FALSE, 
+             group.by = "disease_severity",split.by = "disease_severity",ncol=5,pt.size = 0.5
+) +
+  scale_color_manual(values = c("control"="#4f4d4c",
+                                "mild (3)" ="#ffb867",
+                                "moderate (4-5)" = "#5D63A1",
+                                "severe (7)" = "#982326"
+  ))+ NoLegend()
 
 p
 ```
@@ -1283,9 +1327,13 @@ p <- ggplot(gsva.res.melt, aes(y =value, x = disease_severity)) +
                                                                                 c("mild (3)", "moderate (4-5)"),
                                                                                 c("mild (3)", "severe (7)"),
                                                                                 c("moderate (4-5)", "severe (7)")), 
-                                                                                label = "p.format", method = "wilcox",hide.ns = TRUE) + 
+                             label = "p.format", method = "wilcox",hide.ns = TRUE) + 
   labs(color = "COVID19 severity", shape = "stage")+
-  scale_color_manual(values=color_group_schulte)+
+  scale_color_manual(values=c("control"="#4f4d4c",
+                              "mild (3)" ="#ffb867",
+                              "moderate (4-5)" = "#5D63A1",
+                              "severe (7)" = "#982326"
+  ))+
   theme_classic()
 
 p
@@ -1295,7 +1343,7 @@ p
 
 # Monocyte and DC analysis
 
-## Subset cells based on original annotation
+## Subset analysis of myeloid cells as annotated in Schulte-Schrepping et al., Cell 2020
 
 ```{r}
 seurat_schulte_cohort2_Myeloid <- subset(seurat_schulte_cohort2_pbmc, subset = cell_group %in% c("Classical Monocytes", 
@@ -1517,7 +1565,7 @@ p
 
 #---
 
-# Severity-specific DE genes (Suppl. Table XYZ)
+# Severity-specific DE genes (Suppl. Table 5, sheet 1)
 
 Calculate DE genes
 
@@ -1612,7 +1660,7 @@ for(i in c("up","down")){
 }
 ```
 
-###### HALLMARK (Suppl. Table XYZ)
+###### HALLMARK (Suppl. Table 5, sheet 2)
 
 ```{r, fig.width=20, fig.height=12}
 DE_Mono_HALLMARKresults <- do.call("rbind", DE_Mono_HALLMARK_list)
@@ -1661,22 +1709,30 @@ for(i in unique(tmp$Description)){
 list_terms
 ```
 
-```{r, fig.width=5, fig.height=10}
+```{r, fig.width=16, fig.height=4}
 v <- c("CD83","CD86","TNFAIP3", "GADD45B","BCL6","NR4A1","NR4A2", "IL1B", "DUSP2","DUSP5", "FOSB", "FOS","FOSL1","FOSL2","JUN", "NFKB2",
        "NFKBIA","NFKBIE","REL", "IRF1", "IRF2","IRF5", "IRF7","STAT1", "STAT2", 
        "SOCS3", "IFNAR2","OAS1","OAS3", "IFITM1", "IFITM3", "IFIT2", "IFIT3", "IFI35", "ISG20", "ISG15","MX1", "MX2")
 
+seurat_schulte_cohort2_Mono$severity_stage <- paste(seurat_schulte_cohort2_Mono$disease_severity,seurat_schulte_cohort2_Mono$disease_stage,sep="_")
+seurat_schulte_cohort2_Mono$severity_stage <- factor(seurat_schulte_cohort2_Mono$severity_stage, levels=rev(c("severe (7)_late",
+                                                                                                          "moderate (4-5)_late",
+                                                                                                          "mild (3)_late",
+                                                                                                          "severe (7)_early",
+                                                                                                          "moderate (4-5)_early",
+                                                                                                          "mild (3)_early",
+                                                                                                          "control_control")))
+
+
 p <- DotPlot(seurat_schulte_cohort2_Mono,
-        group.by = "disease_severity",
+        group.by = "severity_stage",
         features = v,
         col.max = 1, col.min = -1, dot.scale = 8)+
   scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
-  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
-  coord_flip()
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
 
 p
 ```
-
 
 ### Rcistarget TF prediction analysis (Figure 5B)
 
@@ -1771,7 +1827,8 @@ p <- ggplot(data_filt[grepl("transfac_pro|cisbp|swissregulon",data_filt$motif),]
 p
 ```
 
-##### Construct TF network
+##### Construct TF network (Figure 6B)
+
 ```{r}
 network_unfilt_df <- NULL
 for(i in 1:nrow(data_unfilt)){
@@ -1818,7 +1875,7 @@ anno_table$label <- ifelse(anno_table$group=="filt",anno_table$motif, "")
 # write_csv(anno_table, "cytoscape_network-annotation_Rcistarget_monocytes_220811.csv")
 ```
 
-## Intersect CD40 unresponsive, amplified and combinatorial signature genes with DEGenes 
+## Intersect CD40 unresponsive, amplified and combinatorial signature genes with DEGenes (Figure 4C)
 
 ```{r, fig.width=12, fig.height=18}
 DE_Mono_list<- list("IFN"=unique(DEGs_Mono_df$Gene[DEGs_Mono_df$Gene %in% list_compressedIFN[['IFN']]]),
@@ -1863,6 +1920,60 @@ p2 <- plotEnrichment(list_compressedIFN$DoubleTrigger,
 p1/p2
 ```
 
+# Sample-specific GSVA (Figure 4B)
+
+```{r}
+expr_mtx <- AggregateExpression(
+  object= seurat_schulte_cohort2_Mono,
+  assays = "RNA",
+  features = NULL,
+  return.seurat = FALSE,
+  group.by = "sampleID",
+  slot = "data"
+)
+expr_mtx <- as.matrix(expr_mtx$RNA)
+
+rSum<-rowSums(expr_mtx)
+keep<-names(rSum[rSum>50])
+expr_mtx <- expr_mtx[row.names(expr_mtx) %in% keep,]
+str(expr_mtx)
+
+gsva.res <- as.data.frame(t(gsva(expr = expr_mtx, 
+                                 gset.idx.list = list_compressedIFN[c("IFN","Amplified","DoubleTrigger")], 
+                                 method = "gsva",
+                                 verbose=FALSE)))
+gsva.res$sampleID <- rownames(gsva.res)
+
+
+gsva.res.melt <- reshape2::melt(gsva.res)
+str(gsva.res.melt)
+```
+
+```{r}
+meta <- unique(seurat_schulte_cohort2_Mono@meta.data[,c("sampleID","disease_severity","disease_stage")])
+idx <- match(gsva.res.melt$sampleID, meta$sampleID)
+gsva.res.melt$disease_severity <- meta$disease_severity[idx]
+gsva.res.melt$disease_stage <- meta$disease_stage[idx]
+```
+
+```{r, fig.width=12,fig.height=4}
+p <- ggplot(gsva.res.melt, aes(y =value, x = disease_severity)) +
+  geom_boxplot(outlier.colour = NA) +
+  geom_point(size = 2, position = position_jitter(width = 0.25),
+             aes(x = disease_severity, y = value, color = disease_severity, shape = disease_stage)) +
+  facet_wrap(vars(variable), scales = "free_y", ncol = 4)+
+  ggpubr::stat_compare_means(mapping = aes_string(group_by), comparisons = list(c("control", "mild (3)"),
+                                                                                c("mild (3)", "moderate (4-5)"),
+                                                                                c("mild (3)", "severe (7)"),
+                                                                                c("moderate (4-5)", "severe (7)")),
+                                                                                label = "p.format", method = "wilcox") +
+  labs(color = "COVID19 severity", shape = "stage")+
+  scale_color_manual(values=color_group_schulte)+
+  theme_classic()+ylab("Enrichment score")
+
+p
+```
+
 #---
 
 ## Subset analysis of mDC (clustering-based)
@@ -1872,7 +1983,7 @@ seurat_schulte_cohort2_mDC <- subset(seurat_schulte_cohort2_Myeloid_clean, subse
 seurat_schulte_cohort2_mDC
 ```
 
-### Identify severity marker genes (Figure 4D)
+### Identify severity marker genes (Figure 4D, Suppl. Table 6)
 
 ```{r}
 Idents(seurat_schulte_cohort2_mDC) <- "disease_severity"
@@ -1929,11 +2040,1754 @@ p
 # --------------------------------------------------------
 # --------------------------------------------------------
 
+# Analysis of additional data sets incl. patients with IFN-AABs (Suppl. Fig. 3 B/C)
+
+# --------------------------------------------------------
+
+# 10x 5' Data on IFN-AAB patients from Charité (Sawitzki group)
+
+Data has been demultiplexed and quality controlled by Lev Petrov as described in the methods section of the manuscript.
+
+```{r}
+seurat_Sawitzki <- LoadH5Seurat("seurat_objects/seurat_sawitzki_221202.h5seurat")
+
+seurat_Sawitzki
+```
+
+### Quality Control
+Filtering by Lev Petrov:
+
+n_feature_lower_filter <- 200
+n_feature_upper_filter <- 5000
+percent.mt_upper_filter <- 10
+nCount_RNA_upper_filter <- 20000
+
+
+```{r, fig.width= 8, fig.height=10}
+p1<-VlnPlot(object = seurat_Sawitzki, features = "nFeature_RNA",assay = "RNA", pt.size = 0, log =TRUE, group.by = "Patient.Id") +
+  theme(legend.position="none") + ggtitle("Genes per Cell") + 
+  ylab("Number of Genes") + xlab("")+ geom_hline(yintercept=c(200,5000), linetype="dashed", color = "red", size=1)
+
+p2<-VlnPlot(object = seurat_Sawitzki, features = "nCount_RNA", assay = "RNA", log =TRUE, pt.size = 0, group.by = "Patient.Id")+
+  theme(legend.position="none") + ggtitle("Transcripts per Cell") + 
+  ylab("Number of UMIs") + xlab("")+ geom_hline(yintercept=c(200,20000), linetype="dashed", color = "red", size=1)
+
+p3<-VlnPlot(object = seurat_Sawitzki, features = "percent.mt",assay = "RNA", pt.size = 0, group.by = "Patient.Id")+ 
+  theme(legend.position="none") + ggtitle("Percent of MT- counts") + 
+  ylab("% of '^mt-' gene counts") + xlab("")+ geom_hline(yintercept=10, linetype="dashed", color = "red", size=1)
+
+CombinePlots(plots = list(p1,p2,p3),ncol=1)
+```
+
+```{r}
+## Normalization
+seurat_Sawitzki <- NormalizeData(object = seurat_Sawitzki, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+## Define variable genes
+seurat_Sawitzki <- FindVariableFeatures(object = seurat_Sawitzki,
+                                      assay="RNA",
+                                      selection.method = 'vst')
+
+## Scaling
+seurat_Sawitzki <- ScaleData(object = seurat_Sawitzki, assay = "RNA",features = rownames(seurat_Sawitzki))
+
+## PCA
+seurat_Sawitzki <- RunPCA(object = seurat_Sawitzki, features = VariableFeatures(object = seurat_Sawitzki), 
+                        verbose = FALSE,
+                        assay="RNA")
+
+## UMAP
+seurat_Sawitzki <- RunUMAP(seurat_Sawitzki, reduction.use = "pca", dims = 1:20, seed.use = 42)
+```
+
+
+```{r, fig.height=12, fig.width=16}
+p1 <- DimPlot(object = seurat_Sawitzki,
+              reduction = 'umap',
+              label = FALSE,shuffle = T,
+              group.by = "sample")
+
+p2 <- DimPlot(object = seurat_Sawitzki,
+              reduction = 'umap',
+              label = FALSE,shuffle = T,
+              group.by = "dataset")
+
+p3 <- DimPlot(object = seurat_Sawitzki,
+              reduction = 'umap',
+              label = FALSE,shuffle = T,
+              group.by = "disease_severity")
+
+p4 <- DimPlot(object = seurat_Sawitzki,
+              reduction = 'umap',
+              label = FALSE,shuffle = T,
+              group.by = "batch")
+
+p1+p2+p3+p4
+```
+
+```{r, fig.height=6, fig.width=6}
+ggplot(seurat_Sawitzki@meta.data, aes(x = batch, fill=sample))+
+  geom_bar()+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+### Seurat v4 Reference Annotation (Azimuth)
+
+Following: <https://satijalab.org/seurat/v4.0/reference_mapping.html>
+
+Normalize query data using sc transform 
+```{r}
+seurat_Sawitzki.sc <- SCTransform(seurat_Sawitzki, verbose = FALSE, assay = "RNA")
+```
+
+```{r}
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = seurat_Sawitzki.sc,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+```
+
+
+```{r}
+seurat_Sawitzki.sc <- MapQuery(
+  anchorset = anchors,
+  query = seurat_Sawitzki.sc,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca", 
+  reduction.model = "wnn.umap"
+)
+```
+
+```{r, fig.width=12, fig.height=6}
+p1 = DimPlot(seurat_Sawitzki.sc, reduction = "ref.umap", group.by = "predicted.celltype.l1", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+p2 = DimPlot(seurat_Sawitzki.sc, reduction = "ref.umap", group.by = "predicted.celltype.l2", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+
+p1 + p2
+```
+
+```{r, fig.width=12, fig.height=3}
+ggplot(seurat_Sawitzki.sc@meta.data, aes(x = predicted.celltype.l2, fill=predicted.celltype.l2))+
+  geom_bar()+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() 
+```
+
+```{r}
+seurat_Sawitzki$predicted.celltype.l1 <- seurat_Sawitzki.sc$predicted.celltype.l1
+seurat_Sawitzki$predicted.celltype.l1.score <- seurat_Sawitzki.sc$predicted.celltype.l1.score
+
+seurat_Sawitzki$predicted.celltype.l2 <- seurat_Sawitzki.sc$predicted.celltype.l2
+seurat_Sawitzki$predicted.celltype.l2.score <- seurat_Sawitzki.sc$predicted.celltype.l2.score
+```
+
+```{r, fig.height=4, fig.width=12}
+ggplot(seurat_Sawitzki@meta.data, aes(x = sample, fill=predicted.celltype.l2))+
+  geom_bar(position = "fill")+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() 
+```
+
+```{r}
+DimPlot(object = seurat_Sawitzki,
+        reduction = 'umap',
+        label = FALSE,shuffle = T,
+        group.by = "predicted.celltype.l2")
+```
+
+```{r}
+rm(seurat_Sawitzki.sc)
+```
+
+#--- 
+
+## Monocytes
+
+```{r}
+seurat_Sawitzki_Mono <- subset(seurat_Sawitzki, subset= predicted.celltype.l2 %in% c("CD14 Mono"))
+seurat_Sawitzki_Mono
+```
+
+```{r}
+table(seurat_Sawitzki_Mono$sample, seurat_Sawitzki_Mono$disease_severity)
+```
+
+#### Sub clustering of monocytes
+```{r}
+## Define variable genes
+seurat_Sawitzki_Mono <- FindVariableFeatures(object = seurat_Sawitzki_Mono,
+                                           assay="RNA",
+                                           selection.method = 'vst')
+
+## Scaling
+seurat_Sawitzki_Mono <- ScaleData(object = seurat_Sawitzki_Mono, assay = "RNA", features = rownames(seurat_Sawitzki_Mono))
+
+## PCA
+seurat_Sawitzki_Mono <- RunPCA(object = seurat_Sawitzki_Mono, features = VariableFeatures(object = seurat_Sawitzki_Mono), 
+                             verbose = FALSE,
+                             assay="RNA")
+
+## UMAP
+seurat_Sawitzki_Mono <- RunUMAP(seurat_Sawitzki_Mono, reduction.use = "pca", dims = 1:20, seed.use = 42)
+```
+
+
+```{r, fig.width= 7, fig.height= 6}
+DimPlot(object = seurat_Sawitzki_Mono,
+        reduction = 'umap',
+        group.by="batch",
+        label = TRUE) + scale_color_manual(values=color_clusters) + NoLegend()
+```
+
+```{r, fig.width=16,fig.height=20}
+seurat_Sawitzki_Mono <- FindNeighbors(object = seurat_Sawitzki_Mono, dims = 1:10, reduction="pca", force.recalc = TRUE)
+```
+
+```{r}
+seurat_Sawitzki_Mono <- FindClusters(object = seurat_Sawitzki_Mono, resolution = 0.2, algorithm = 1)
+```
+
+```{r, fig.width= 7, fig.height= 6}
+DimPlot(object = seurat_Sawitzki_Mono,
+        reduction = 'umap',
+        group.by="RNA_snn_res.0.2",
+        label = TRUE) + scale_color_manual(values=color_clusters) + NoLegend()
+```
+
+#### Cells per seurat cell type per cluster
+
+```{r, fig.height=5, fig.width=12}
+ggplot(seurat_Sawitzki_Mono@meta.data, aes(x = RNA_snn_res.0.2, fill=batch))+
+  geom_bar(position="fill")+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() 
+```
+
+### Identify cluster marker genes
+
+```{r}
+Idents(seurat_Sawitzki_Mono) <- "RNA_snn_res.0.2"
+seurat_Sawitzki_Mono_cluster.markers.wilcox_res.0.2 <- FindAllMarkers(object = seurat_Sawitzki_Mono,
+                                                                    only.pos = TRUE,
+                                                                    min.pct = 0.2,
+                                                                    logfc.threshold = 0.2,
+                                                                    min.diff.pct = 0.1,
+                                                                    test.use = "wilcox"
+)
+```
+
+##### Dotplot
+
+```{r, fig.width=8, fig.height=12}
+top <- seurat_Sawitzki_Mono_cluster.markers.wilcox_res.0.2 %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+
+p <- DotPlot(seurat_Sawitzki_Mono,
+             group.by = "RNA_snn_res.0.2",
+             features =c("CD14", unique(top$gene)))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+
+### Filter Monocyte/T cell cluster
+```{r}
+seurat_Sawitzki_Mono_filt <- subset(seurat_Sawitzki_Mono, subset = RNA_snn_res.0.2 == "4", invert=TRUE)
+table(seurat_Sawitzki_Mono_filt$RNA_snn_res.0.2)
+```
+
+### Save monocyte seurat object
+
+```{r}
+# SaveH5Seurat(
+#   object= seurat_Sawitzki_Mono_filt,
+#   file= paste("seurat_objects/seurat_Sawitzki_Mono_filt_",Sys.Date(),sep=""))
+
+# seurat_Sawitzki_Mono_filt <- LoadH5Seurat("seurat_objects/seurat_Sawitzki_Mono_filt_2023-01-12.h5seurat")
+```
+
+### Marker Gene Expression (Suppl. Figure 3B, top panel)
+
+```{r, fig.width=18,fig.height=9}
+seurat_Sawitzki_Mono_filt$disease_severity <- factor(seurat_Sawitzki_Mono_filt$disease_severity,levels=c("control",
+                                                                                                     "1-3",
+                                                                                                     "6-8",
+                                                                                                     "7-8_anti-IFN"))
+
+p <- FeatureBoxPlot(seu=seurat_Sawitzki_Mono_filt, 
+               by = "features", 
+               assay = "RNA", 
+               slot = "data", 
+               exprs.function = "mean",
+               features = c("HLA-DRA","HLA-DRB1","ISG15", "IFIT2", "CD83", "CCL4", "TNF"), 
+               meta.include = c("disease_severity","disease_stage"), 
+               group_by = "disease_severity", 
+               shape_by = "disease_stage", 
+               each.pt = "sample", 
+               custom_fill_colors = c("control"="#4f4d4c",
+                                      "1-3" = "#ffb867",
+                                      "4-5"="#5D63A1",
+                                      "6-8"="#982326",
+                                      "7-8_anti-IFN"="#DA2746"),
+               color_by = "disease_severity", 
+               comparisons = list(),
+               # comparisons = list(c("1-3","6-8"),
+               #                    c("1-3", "7-8_anti-IFN"),
+               #                    c("6-8", "7-8_anti-IFN")), 
+               ncol = 7, 
+               label = "p.format", 
+               select.idents = NULL, 
+               label.x = NA, pt.size = NA, facet.face = "bold.italic") + 
+  ggtitle("Sawitzki Monocyte RNA expression")+
+  theme(plot.title = element_text(size=12))+scale_shape_manual(values = c("control"=15,
+                                                                          "early"=19,
+                                                                          "late"=17))
+
+p
+```
+
+# --------------------------------------------------------
+
+# 10X 5', Georg et al. Cell 2021
+
+PBMC scRNA-seq data was provided by Rosario Astaburuaga-García for https://doi.org/10.1016/j.cell.2021.12.040 after personal communication.
+
+```{r}
+seurat_georg_orig <- LoadH5Seurat("seurat_objects/seurat_georg_orig_221102.h5seurat")
+
+seurat_georg_orig
+```
+```{r}
+head(seurat_georg_orig@meta.data)
+```
+
+```{r}
+table(seurat_georg_orig$phase,seurat_georg_orig$disease)
+
+table(seurat_georg_orig$is_pbmc)
+```
+
+```{r}
+seurat_georg_orig$disease_severity_orig <- seurat_georg_orig$disease_severity
+```
+
+
+```{r}
+seurat_georg_orig$disease_severity <- ifelse(seurat_georg_orig$disease_severity_merge == "HBV", "HBV",
+                                             ifelse(seurat_georg_orig$disease_severity_merge == "FLI", "FLI",
+                                                    ifelse(as.character(seurat_georg_orig$maxWHO) %in% c(1,2,3), "1-3",
+                                                           ifelse(as.character(seurat_georg_orig$maxWHO) %in% c(4,5), "4-5",
+                                                                  ifelse(as.character(seurat_georg_orig$maxWHO) %in% c(6,7,8), "6-8",
+                                                                         ifelse(seurat_georg_orig$disease_severity_merge == "HC", "control",
+                                                                                "error"))))))
+
+table(seurat_georg_orig$disease_severity,seurat_georg_orig$disease_severity_merge)
+
+seurat_georg_orig$disease_severity <- factor(seurat_georg_orig$disease_severity, levels=c("control",
+                                                                                          "1-3",
+                                                                                          "4-5",
+                                                                                          "6-8",
+                                                                                          "FLI",
+                                                                                          "HBV"))
+```
+
+### Quality Control
+```{r, fig.width= 10, fig.height=10}
+p1<-VlnPlot(object = seurat_georg_orig, features = "nFeature_RNA",pt.size = 0, log =TRUE, group.by = "sample") + theme(legend.position="none") + ggtitle("Genes per Cell") + ylab("Number of Genes") + xlab("")+ geom_hline(yintercept=100, linetype="dashed", color = "red", size=1)
+
+p2<-VlnPlot(object = seurat_georg_orig, features = "nCount_RNA", log =TRUE, pt.size = 0, group.by = "sample")+ theme(legend.position="none") + ggtitle("Transcripts per Cell") + ylab("Number of UMIs") + xlab("")+ geom_hline(yintercept=100, linetype="dashed", color = "red", size=1)
+
+p3<-VlnPlot(object = seurat_georg_orig, features = "percent.mt",pt.size = 0, group.by = "sample")+ theme(legend.position="none") + ggtitle("Percent of MT- counts") + ylab("% of '^mt-' gene counts") + xlab("")+ geom_hline(yintercept=5, linetype="dashed", color = "red", size=1)
+
+
+CombinePlots(plots = list(p1,p2,p3),ncol=1)
+```
+
+## Re-Processing
+
+```{r}
+seurat_georg <- seurat_georg_orig
+DefaultAssay(seurat_georg) <- "RNA"
+seurat_georg@assays$integrated <- NULL
+```
+
+#### Exclude T cell batches
+
+```{r}
+seurat_georg <- subset(seurat_georg, subset = is_pbmc == TRUE)
+```
+
+
+```{r, fig.height=6, fig.width=8}
+## Normalization
+seurat_georg <- NormalizeData(object = seurat_georg, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+## Define variable genes
+seurat_georg <- FindVariableFeatures(object = seurat_georg,
+                             assay="RNA",
+                             selection.method = 'vst')
+
+## Scaling
+seurat_georg <- ScaleData(object = seurat_georg, assay = "RNA")
+
+## PCA
+seurat_georg <- RunPCA(object = seurat_georg, features = VariableFeatures(object = seurat_georg), verbose = FALSE)
+
+## UMAP
+seurat_georg <- RunUMAP(seurat_georg, reduction.use = "pca", dims = 1:20, seed.use = 42)
+```
+
+
+
+```{r, fig.height=6, fig.width=8}
+DimPlot(object = seurat_georg,
+        reduction = 'umap',
+        label = FALSE,shuffle = T,
+        group.by = "disease")+
+  scale_color_manual(values = c("CV"="#ffb867",
+                                "HC"="#6d1323",
+                                "FLI"="#27dabb",
+                                "HBV"="#27da62"))
+```
+
+
+### Seurat v4 Reference Annotation (Azimuth)
+
+Following: <https://satijalab.org/seurat/v4.0/reference_mapping.html>
+
+Normalize query data using sc transform 
+```{r}
+seurat_georg.sc <- SCTransform(seurat_georg, verbose = FALSE, assay = "RNA")
+```
+
+```{r}
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = seurat_georg.sc,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+```
+
+
+```{r}
+seurat_georg.sc <- MapQuery(
+  anchorset = anchors,
+  query = seurat_georg.sc,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca", 
+  reduction.model = "wnn.umap"
+)
+```
+
+```{r, fig.width=12, fig.height=6}
+p1 = DimPlot(seurat_georg.sc, reduction = "ref.umap", group.by = "predicted.celltype.l1", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+p2 = DimPlot(seurat_georg.sc, reduction = "ref.umap", group.by = "predicted.celltype.l2", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+
+p1 + p2
+```
+
+```{r, fig.width=12, fig.height=3}
+ggplot(seurat_georg.sc@meta.data, aes(x = predicted.celltype.l2, fill=predicted.celltype.l2))+
+  geom_bar()+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() 
+```
+
+```{r}
+seurat_georg$predicted.celltype.l1 <- seurat_georg.sc$predicted.celltype.l1
+seurat_georg$predicted.celltype.l1.score <- seurat_georg.sc$predicted.celltype.l1.score
+
+seurat_georg$predicted.celltype.l2 <- seurat_georg.sc$predicted.celltype.l2
+seurat_georg$predicted.celltype.l2.score <- seurat_georg.sc$predicted.celltype.l2.score
+```
+
+```{r, fig.height=4, fig.width=12}
+ggplot(seurat_georg@meta.data, aes(x = as.character(patient_id), fill=predicted.celltype.l2))+
+  geom_bar(position = "fill")+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() 
+```
+
+```{r}
+DimPlot(object = seurat_georg,
+        reduction = 'umap',
+        label = FALSE,
+        shuffle = T,
+        group.by = "predicted.celltype.l2")
+```
+
+```{r}
+rm(seurat_georg.sc)
+```
+
+#--- 
+
+## Monocytes
+
+```{r}
+seurat_georg_Mono <- subset(seurat_georg, subset= predicted.celltype.l2 %in% c("CD14 Mono"))
+seurat_georg_Mono
+```
+
+#### Sub clustering of monocytes
+```{r}
+## Define variable genes
+seurat_georg_Mono <- FindVariableFeatures(object = seurat_georg_Mono,
+                             assay="RNA",
+                             selection.method = 'vst')
+
+## Scaling
+seurat_georg_Mono <- ScaleData(object = seurat_georg_Mono, assay = "RNA")
+
+## PCA
+seurat_georg_Mono <- RunPCA(object = seurat_georg_Mono, features = VariableFeatures(object = seurat_georg_Mono), 
+                                   verbose = FALSE,
+                                   assay="RNA")
+
+## UMAP
+seurat_georg_Mono <- RunUMAP(seurat_georg_Mono, reduction.use = "pca", dims = 1:20, seed.use = 42)
+```
+
+
+```{r, fig.width= 7, fig.height= 6}
+DimPlot(object = seurat_georg_Mono,
+        reduction = 'umap',
+        group.by="disease_severity",
+        label = TRUE) + scale_color_manual(values=c("control"="#4f4d4c",
+                                                    "1-3" = "#ffb867",
+                                                    "4-5"="#5D63A1",
+                                                    "6-8"="#982326",
+                                                    "FLI"="#27dabb",
+                                                    "HBV"="#27da62"
+                                                    )) + NoLegend()
+```
+
+```{r, fig.width=16,fig.height=20}
+seurat_georg_Mono <- FindNeighbors(object = seurat_georg_Mono, dims = 1:10, reduction="pca", force.recalc = TRUE)
+```
+
+```{r}
+seurat_georg_Mono <- FindClusters(object = seurat_georg_Mono, resolution = 0.2, algorithm = 1)
+```
+
+```{r, fig.width= 7, fig.height= 6}
+DimPlot(object = seurat_georg_Mono,
+        reduction = 'umap',
+        group.by="RNA_snn_res.0.2",
+        label = TRUE) + scale_color_manual(values=color_clusters) + NoLegend()
+```
+
+#### Cells per seurat cell type per cluster
+
+```{r, fig.height=5, fig.width=12}
+ggplot(seurat_georg_Mono@meta.data, aes(x = RNA_snn_res.0.2, fill=as.character(patient_id)))+
+  geom_bar(position="fill")+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() 
+```
+
+### Identify cluster marker genes
+
+```{r}
+Idents(seurat_georg_Mono) <- "RNA_snn_res.0.2"
+seurat_georg_Mono_cluster.markers.wilcox_res.0.2 <- FindAllMarkers(object = seurat_georg_Mono,
+                                                                    only.pos = TRUE,
+                                                                    min.pct = 0.2,
+                                                                    logfc.threshold = 0.2,
+                                                                    min.diff.pct = 0.1,
+                                                                    test.use = "wilcox"
+)
+```
+
+##### Dotplot
+
+```{r, fig.width=8, fig.height=12}
+top <- seurat_georg_Mono_cluster.markers.wilcox_res.0.2 %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+
+p <- DotPlot(seurat_georg_Mono,
+        group.by = "RNA_snn_res.0.2",
+        features =c("CD14", unique(top$gene)))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+### Filter Monocyte/T cell cluster
+```{r}
+seurat_georg_Mono_filt <- subset(seurat_georg_Mono, subset = RNA_snn_res.0.2 == "2", invert=TRUE)
+table(seurat_georg_Mono_filt$RNA_snn_res.0.2)
+```
+
+### Save monocyte seurat object
+
+```{r}
+# SaveH5Seurat(
+#   object= seurat_georg_Mono_filt,
+#   file= paste("seurat_objects/seurat_georg_Mono_filt_",Sys.Date(),sep=""))
+
+# seurat_georg_Mono_filt <- LoadH5Seurat("seurat_objects/seurat_georg_Mono_filt_2022-12-07.h5seurat")
+```
+
+#-----------------------------------------------------------------------
+
+# 10X 5', Su et al. Cell 2020
+
+Data downloaded from https://www.sciencedirect.com/science/article/pii/S0092867420314446?via%3Dihub 
+
+```{r}
+seurat_su_orig <- LoadH5Seurat("seurat_objects/Su_Cell_2020_210324.h5seurat")
+
+seurat_su_orig
+```
+
+## Inspect meta data 
+
+```{r}
+head(seurat_su_orig@meta.data)
+```
+
+
+```{r}
+seurat_su_orig$disease_stage_orig <- seurat_su_orig$disease_stage
+seurat_su_orig$disease_stage <- ifelse(seurat_su_orig$diagnosis=="control","control",seurat_su_orig$disease_stage)
+seurat_su_orig$disease_stage <- ifelse(is.na(seurat_su_orig$disease_stage),"unknown",seurat_su_orig$disease_stage)
+
+table(seurat_su_orig$disease_stage)
+table(seurat_su_orig$disease_stage,seurat_su_orig$diagnosis)
+```
+
+
+```{r}
+seurat_su_orig$disease_severity <- ifelse(seurat_su_orig$diagnosis == "control", "control",
+                                          ifelse(seurat_su_orig$Who.Ordinal.Scale %in% c("1","1 or 2","2", "3"), "1-3",
+                                                 ifelse(as.character(seurat_su_orig$Who.Ordinal.Scale) %in% c(4,5), "4-5",
+                                                        ifelse(as.character(seurat_su_orig$Who.Ordinal.Scale) %in% c(6,7), "6-8",
+                                                               "error"))))
+
+seurat_su_orig$disease_severity <- factor(seurat_su_orig$disease_severity, levels=c("control",
+                                                                                    "1-3",
+                                                                                    "4-5",
+                                                                                    "6-8"))
+
+table(seurat_su_orig$disease_severity,seurat_su_orig$disease_stage)
+```
+
+## Re-Processing
+
+```{r}
+seurat_su <- seurat_su_orig
+DefaultAssay(seurat_su) <- "RNA"
+```
+
+```{r}
+rm(seurat_su_orig)
+```
+
+#### Exclude timepoint T2
+
+```{r}
+seurat_su$Blood.draw.time.point <- ifelse(seurat_su$disease_severity == "control", "control", seurat_su$Blood.draw.time.point)
+
+seurat_su <- subset(seurat_su, subset = Blood.draw.time.point %in% c("control","T1"))
+seurat_su
+```
+
+```{r}
+table(seurat_su$disease_severity,seurat_su$disease_stage)
+```
+
+
+```{r, fig.width= 24, fig.height=10}
+p1<-VlnPlot(object = seurat_su, features = "nFeature_RNA",pt.size = 0, log =TRUE, group.by = "sample") + theme(legend.position="none") + ggtitle("Genes per Cell") + ylab("Number of Genes") + xlab("")+ geom_hline(yintercept=100, linetype="dashed", color = "red", size=1)+ 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+p2<-VlnPlot(object = seurat_su, features = "nCount_RNA", log =TRUE, pt.size = 0, group.by = "sample")+ theme(legend.position="none") + ggtitle("Transcripts per Cell") + ylab("Number of UMIs") + xlab("")+ geom_hline(yintercept=100, linetype="dashed", color = "red", size=1)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+seurat_su[["percent.mt"]] <- PercentageFeatureSet(object = seurat_su, pattern = "^MT-")
+p3<-VlnPlot(object = seurat_su, features = "percent.mt",pt.size = 0, group.by = "sample")+ theme(legend.position="none") + ggtitle("Percent of MT- counts") + ylab("% of '^mt-' gene counts") + xlab("")+ geom_hline(yintercept=5, linetype="dashed", color = "red", size=1)+ 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+CombinePlots(plots = list(p1,p2,p3),ncol=1)
+```
+
+
+```{r, fig.height=6, fig.width=8}
+## Normalization
+seurat_su <- NormalizeData(object = seurat_su, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+## Define variable genes
+seurat_su <- FindVariableFeatures(object = seurat_su,
+                             assay="RNA",
+                             selection.method = 'vst')
+
+## Scaling
+seurat_su <- ScaleData(object = seurat_su, assay = "RNA")
+
+## PCA
+seurat_su <- RunPCA(object = seurat_su, features = VariableFeatures(object = seurat_su), verbose = FALSE)
+
+## UMAP
+seurat_su <- RunUMAP(seurat_su, reduction.use = "pca", dims = 1:20, seed.use = 42)
+```
+
+
+
+```{r, fig.height=6, fig.width=8}
+DimPlot(object = seurat_su,
+        reduction = 'umap',
+        label = FALSE,shuffle = T,
+        group.by = "sample")
+
+DimPlot(object = seurat_su,
+        reduction = 'umap',
+        label = FALSE,shuffle = T,
+        group.by = "disease_stage")
+
+DimPlot(object = seurat_su,
+        reduction = 'umap',
+        label = FALSE,shuffle = T,
+        group.by = "disease_severity")+
+  scale_color_manual(values = c("control"="#4f4d4c",
+                                "1-3" = "#ffb867",
+                                "4-5"="#5D63A1",
+                                "6-8"="#982326"))
+```
+
+### Seurat v4 Reference Annotation (Azimuth)
+
+Following: <https://satijalab.org/seurat/v4.0/reference_mapping.html>
+
+Normalize query data using sc transform 
+```{r}
+seurat_su.sc <- SCTransform(seurat_su, verbose = FALSE, assay = "RNA")
+```
+
+```{r}
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = seurat_su.sc,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+```
+
+
+```{r}
+seurat_su.sc <- MapQuery(
+  anchorset = anchors,
+  query = seurat_su.sc,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca", 
+  reduction.model = "wnn.umap"
+)
+```
+
+```{r, fig.width=12, fig.height=6}
+p1 = DimPlot(seurat_su.sc, reduction = "ref.umap", group.by = "predicted.celltype.l1", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+p2 = DimPlot(seurat_su.sc, reduction = "ref.umap", group.by = "predicted.celltype.l2", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+
+p1 + p2
+```
+
+```{r, fig.width=12, fig.height=3}
+ggplot(seurat_su.sc@meta.data, aes(x = predicted.celltype.l2, fill=predicted.celltype.l2))+
+  geom_bar()+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() 
+```
+
+```{r}
+seurat_su$predicted.celltype.l1 <- seurat_su.sc$predicted.celltype.l1
+seurat_su$predicted.celltype.l1.score <- seurat_su.sc$predicted.celltype.l1.score
+
+seurat_su$predicted.celltype.l2 <- seurat_su.sc$predicted.celltype.l2
+seurat_su$predicted.celltype.l2.score <- seurat_su.sc$predicted.celltype.l2.score
+```
+
+```{r, fig.height=4, fig.width=12}
+ggplot(seurat_su@meta.data, aes(x = as.character(sample), fill=predicted.celltype.l2))+
+  geom_bar(position = "fill")+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() 
+```
+
+```{r}
+DimPlot(object = seurat_su,
+        reduction = 'umap',
+        label = FALSE,
+        shuffle = T,
+        group.by = "predicted.celltype.l2")
+```
+
+#--- 
+
+## Monocytes
+
+```{r}
+seurat_su_Mono <- subset(seurat_su, subset= predicted.celltype.l2 %in% c("CD14 Mono"))
+seurat_su_Mono
+```
+```{r}
+table(seurat_su_Mono$disease_severity,seurat_su_Mono$disease_stage)
+```
+
+
+#### Sub clustering of monocytes
+```{r}
+## Define variable genes
+seurat_su_Mono <- FindVariableFeatures(object = seurat_su_Mono,
+                             assay="RNA",
+                             selection.method = 'vst')
+
+## Scaling
+seurat_su_Mono <- ScaleData(object = seurat_su_Mono, assay = "RNA")
+
+## PCA
+seurat_su_Mono <- RunPCA(object = seurat_su_Mono, features = VariableFeatures(object = seurat_su_Mono), 
+                                   verbose = FALSE,
+                                   assay="RNA")
+
+## UMAP
+seurat_su_Mono <- RunUMAP(seurat_su_Mono, reduction.use = "pca", dims = 1:20, seed.use = 42)
+```
+
+
+```{r, fig.width= 7, fig.height= 6}
+DimPlot(object = seurat_su_Mono,
+        reduction = 'umap',
+        group.by="disease_severity",
+        label = TRUE) + scale_color_manual(values=c("control"="#4f4d4c",
+                                                    "1-3" = "#ffb867",
+                                                    "4-5"="#5D63A1",
+                                                    "6-8"="#982326"
+                                                    )) + NoLegend()
+```
+
+```{r, fig.width=16,fig.height=20}
+seurat_su_Mono <- FindNeighbors(object = seurat_su_Mono, dims = 1:10, reduction="pca", force.recalc = TRUE)
+```
+
+```{r}
+seurat_su_Mono <- FindClusters(object = seurat_su_Mono, resolution = 0.2, algorithm = 1)
+```
+
+```{r, fig.width= 7, fig.height= 6}
+DimPlot(object = seurat_su_Mono,
+        reduction = 'umap',
+        group.by="RNA_snn_res.0.2",
+        label = TRUE) + scale_color_manual(values=color_clusters) + NoLegend()
+```
+
+### Identify cluster marker genes
+
+```{r}
+Idents(seurat_su_Mono) <- "RNA_snn_res.0.2"
+seurat_su_Mono_cluster.markers.wilcox_res.0.2 <- FindAllMarkers(object = seurat_su_Mono,
+                                                                    only.pos = TRUE,
+                                                                    min.pct = 0.2,
+                                                                    logfc.threshold = 0.2,
+                                                                    min.diff.pct = 0.1,
+                                                                    test.use = "wilcox"
+)
+```
+
+##### Dotplot
+
+```{r, fig.width=8, fig.height=12}
+top <- seurat_su_Mono_cluster.markers.wilcox_res.0.2 %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+
+p <- DotPlot(seurat_su_Mono,
+        group.by = "RNA_snn_res.0.2",
+        features =c("CD14", unique(top$gene)))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+### Filter Monocyte/T cell cluster
+```{r}
+seurat_su_Mono_filt <- subset(seurat_su_Mono, subset = RNA_snn_res.0.2 == "3", invert=TRUE)
+table(seurat_su_Mono_filt$RNA_snn_res.0.2)
+```
+
+```{r}
+table(seurat_su_Mono_filt$disease_severity, seurat_su_Mono_filt$disease_stage)
+```
+
+
+### Save monocyte seurat object
+
+```{r}
+# SaveH5Seurat(
+#   object= seurat_su_Mono_filt,
+#   file= paste("seurat_objects/seurat_su_Mono_filt_",Sys.Date(),sep=""))
+
+# seurat_su_Mono_filt <- LoadH5Seurat("seurat_objects/seurat_su_Mono_filt_2022-12-21.h5seurat")
+```
+
+# --------------------------------------------------------
+
+# 10X 5', Van der Wijst et al. STM 2021
+
+```{r}
+seurat_wijst_orig <- readRDS("seurat_objects/Seurat_Wijst_2022_220515.rds")
+
+seurat_wijst_orig
+```
+
+### Explore meta data
+
+```{r}
+head(seurat_wijst_orig@meta.data)
+```
+
+```{r}
+seurat_wijst_orig$sample <- paste(seurat_wijst_orig$donor, seurat_wijst_orig$timepoint, sep="_")
+```
+
+```{r}
+table(seurat_wijst_orig$pulmonary_infection)
+table(seurat_wijst_orig$non_pulmonary_infection)
+```
+
+```{r}
+table(seurat_wijst_orig$timepoint, seurat_wijst_orig$onset_to_D0_days)
+```
+
+```{r}
+table(seurat_wijst_orig$NIH_ordinal, seurat_wijst_orig$NIH_clinical)
+```
+
+```{r}
+tmp <- unique(seurat_wijst_orig@meta.data[,c("sample", "donor", "timepoint","COVID_severity","death","NIH_ordinal","onset_to_D0_days","COVID_status")])
+table(tmp$COVID_severity, tmp$onset_to_D0_days)
+table(tmp$timepoint, tmp$NIH_ordinal)
+table(tmp$timepoint, tmp$COVID_status)
+table(tmp$timepoint, tmp$onset_to_D0_days)
+table(tmp$onset_to_D0_days, tmp$COVID_status)
+```
+
+
+```{r}
+seurat_wijst_orig$COVID_severity <- factor(seurat_wijst_orig$COVID_severity, levels = c("Healthy",
+                                                                                        "Moderate_Negative",
+                                                                                        "Moderate_Positive",
+                                                                                        "Severe_Negative",
+                                                                                        "Severe_Positive",
+                                                                                        "Critical_Negative",
+                                                                                        "Critical_Positive",
+                                                                                        "Critical_Positive_anti-IFN"))
+
+seurat_wijst_orig$timepoint <- factor(seurat_wijst_orig$timepoint, levels = c("None",
+                                                                              "0",
+                                                                              "4",
+                                                                              "7",
+                                                                              "14"))
+```
+
+```{r}
+seurat_wijst_orig$disease_severity <- ifelse(as.character(seurat_wijst_orig$COVID_severity) == "Critical_Positive_anti-IFN", "7-8_anti-IFN",
+                                             ifelse(as.character(seurat_wijst_orig$NIH_ordinal) %in% c(4,5), "4-5",
+                                                    ifelse(as.character(seurat_wijst_orig$NIH_ordinal) %in% c(6,7), "6-8",
+                                                           ifelse(as.character(seurat_wijst_orig$NIH_ordinal) == "Healthy", "control","error"))))
+
+seurat_wijst_orig$disease_severity <- factor(seurat_wijst_orig$disease_severity, levels=c("control",
+                                                                                          "4-5",
+                                                                                          "6-8",
+                                                                                          "7-8_anti-IFN"))
+```
+
+### Integrated UMAP
+
+```{r, fig.width=16, fig.height=6}
+p1 <- DimPlot(object = seurat_wijst_orig, 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "NIH_ordinal"
+        )
+
+p2 <- DimPlot(object = seurat_wijst_orig, 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "cell_type"
+        )
+
+p3 <- DimPlot(object = seurat_wijst_orig, 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "disease_severity"
+)+scale_color_manual(values=c("control"="grey",
+                              "4-5"="#3a5272",
+                              "6-8"="#c88a2c",
+                              "7-8_anti-IFN"="#4c6216"))
+
+CombinePlots(plots = list(p1,p2,p3), ncol=3)
+```
+
+# Re-Processing
+
+```{r}
+mtx <- GetAssayData(seurat_wijst_orig, assay="RNA", slot="counts")
+mtx@Dimnames[[1]] <- as.character(seurat_wijst_orig@assays$RNA@meta.features$feature_name)
+
+wijst_meta <- seurat_wijst_orig@meta.data[,c("donor",
+                                             "timepoint",
+                                             "respiratory_support_D0",
+                                             "onset_to_D0_days",
+                                             "intubated_days",
+                                             "admission_to_discharge",
+                                             "D0_to_death",
+                                             "race",
+                                             "consent",
+                                             "death",
+                                             "pulmonary_infection",
+                                             "non_pulmonary_infection",
+                                             "leiden",
+                                             "onset_to_D0_days-as_float",
+                                             "original_leiden",
+                                             "ct1","ct2", "ct3",
+                                             "WBC_count1", "WBC_count2", "WBC_count3", 
+                                             "Lymphocyte_count", "Monocyte_count", 
+                                             "cell_group", 
+                                             "exclude_restricted",
+                                             "IFN_shared_score",
+                                             "IFN_beta_score",
+                                             "IFN_gamma_score",
+                                             "days_from_start",
+                                             "COVID_status",
+                                             "admission_level",
+                                             "respiratory_support",
+                                             "NIH_clinical",
+                                             "COVID_severity",
+                                             "COVID_severity_merged",
+                                             "NIH_ordinal",
+                                             "tissue_ontology_term_id",
+                                             "assay_ontology_term_id",
+                                             "disease_ontology_term_id",
+                                             "development_stage_ontology_term_id",
+                                             "cell_type_ontology_term_id",
+                                             "ethnicity_ontology_term_id",
+                                             "sex_ontology_term_id",
+                                             "is_primary_data",
+                                             "organism_ontology_term_id",
+                                             "cell_type",
+                                             "assay",
+                                             "disease",
+                                             "organism",
+                                             "sex",
+                                             "tissue",
+                                             "ethnicity",
+                                             "development_stage",
+                                             "sample",
+                                             "disease_severity")]
+
+seurat_wijst <- CreateSeuratObject(counts = mtx, 
+                                   meta.data = wijst_meta)
+```
+
+### Filter for earliest sample per donor
+
+```{r}
+seurat_wijst <- subset(seurat_wijst, subset = timepoint %in% c("None","0"))
+
+seurat_wijst
+```
+
+```{r}
+tmp <- unique(seurat_wijst@meta.data[,c("sample", "disease_severity", "onset_to_D0_days")])
+table(tmp$disease_severity, tmp$onset_to_D0_days)
+```
+
+```{r}
+seurat_wijst$onset_to_D0_days <- ifelse(seurat_wijst$onset_to_D0_days == "nan",0,as.character(seurat_wijst$onset_to_D0_days))
+table(seurat_wijst$onset_to_D0_days)
+
+seurat_wijst$disease_stage <- ifelse(seurat_wijst$disease_severity == "control", "control",
+                                     ifelse(seurat_wijst$onset_to_D0_days %in% c("blank","unknown"),"unknown",
+                                            ifelse(seurat_wijst$onset_to_D0_days <= 10, "acute_early",
+                                                   ifelse(seurat_wijst$onset_to_D0_days > 10, "acute_late",
+                                                   "error"))))
+
+table(seurat_wijst$onset_to_D0_days,seurat_wijst$disease_stage)
+```
+
+```{r}
+tmp <- unique(seurat_wijst@meta.data[,c("sample", "disease_severity", "disease_stage")])
+table(tmp$disease_severity, tmp$disease_stage)
+```
+
+### Quality Control
+```{r, fig.width= 24, fig.height=10}
+p1<-VlnPlot(object = seurat_wijst, features = "nFeature_RNA",pt.size = 0, log =TRUE, group.by = "sample") + theme(legend.position="none") + ggtitle("Genes per Cell") + ylab("Number of Genes") + xlab("")+ geom_hline(yintercept=100, linetype="dashed", color = "red", size=1)+ 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+p2<-VlnPlot(object = seurat_wijst, features = "nCount_RNA", log =TRUE, pt.size = 0, group.by = "sample")+ theme(legend.position="none") + ggtitle("Transcripts per Cell") + ylab("Number of UMIs") + xlab("")+ geom_hline(yintercept=100, linetype="dashed", color = "red", size=1)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+seurat_wijst[["percent.mt"]] <- PercentageFeatureSet(object = seurat_wijst, pattern = "^MT-")
+p3<-VlnPlot(object = seurat_wijst, features = "percent.mt",pt.size = 0, group.by = "sample")+ theme(legend.position="none") + ggtitle("Percent of MT- counts") + ylab("% of '^mt-' gene counts") + xlab("")+ geom_hline(yintercept=5, linetype="dashed", color = "red", size=1)+ 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+CombinePlots(plots = list(p1,p2,p3),ncol=1)
+```
+
+
+```{r, fig.height=6, fig.width=8}
+## Normalization
+seurat_wijst <- NormalizeData(object = seurat_wijst, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+## Define variable genes
+seurat_wijst <- FindVariableFeatures(object = seurat_wijst,
+                             assay="RNA",
+                             selection.method = 'vst')
+
+## Scaling
+seurat_wijst <- ScaleData(object = seurat_wijst, assay = "RNA")
+
+## PCA
+seurat_wijst <- RunPCA(object = seurat_wijst, features = VariableFeatures(object = seurat_wijst), verbose = FALSE)
+
+## UMAP
+seurat_wijst <- RunUMAP(seurat_wijst, reduction.use = "pca", dims = 1:20, seed.use = 42)
+```
+
+
+```{r, fig.width=24, fig.height=6}
+p1 <- DimPlot(object = seurat_wijst, 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "sample"
+        )+NoLegend()
+
+p2 <- DimPlot(object = seurat_wijst, 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "cell_type"
+        )
+
+p3 <- DimPlot(object = seurat_wijst, 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "disease_severity"
+)+scale_color_manual(values=c("control"="grey",
+                              "4-5"="#3a5272",
+                              "6-8"="#c88a2c",
+                              "7-8_anti-IFN"="#4c6216"))
+
+p4 <- DimPlot(object = seurat_wijst, 
+        reduction = 'umap', 
+        label = FALSE, 
+        group.by = "disease_stage"
+)
+
+CombinePlots(plots = list(p1,p2,p3,p4), ncol=4)
+```
+
+
+### Seurat v4 Reference Annotation (Azimuth)
+
+Following: <https://satijalab.org/seurat/v4.0/reference_mapping.html>
+
+Normalize query data using sc transform 
+```{r}
+seurat_wijst.sc <- SCTransform(seurat_wijst, verbose = FALSE, assay = "RNA")
+```
+
+```{r}
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = seurat_wijst.sc,
+  normalization.method = "SCT",
+  reference.reduction = "spca",
+  dims = 1:50
+)
+```
+
+
+```{r}
+seurat_wijst.sc <- MapQuery(
+  anchorset = anchors,
+  query = seurat_wijst.sc,
+  reference = reference,
+  refdata = list(
+    celltype.l1 = "celltype.l1",
+    celltype.l2 = "celltype.l2",
+    predicted_ADT = "ADT"
+  ),
+  reference.reduction = "spca", 
+  reduction.model = "wnn.umap"
+)
+```
+
+```{r, fig.width=12, fig.height=6}
+p1 = DimPlot(seurat_wijst.sc, reduction = "ref.umap", group.by = "predicted.celltype.l1", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+p2 = DimPlot(seurat_wijst.sc, reduction = "ref.umap", group.by = "predicted.celltype.l2", label = TRUE, label.size = 3 ,repel = TRUE) + NoLegend()
+
+p1 + p2
+```
+
+```{r, fig.width=12, fig.height=3}
+ggplot(seurat_wijst.sc@meta.data, aes(x = predicted.celltype.l2, fill=predicted.celltype.l2))+
+  geom_bar()+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() 
+```
+
+```{r}
+seurat_wijst$predicted.celltype.l1 <- seurat_wijst.sc$predicted.celltype.l1
+seurat_wijst$predicted.celltype.l1.score <- seurat_wijst.sc$predicted.celltype.l1.score
+
+seurat_wijst$predicted.celltype.l2 <- seurat_wijst.sc$predicted.celltype.l2
+seurat_wijst$predicted.celltype.l2.score <- seurat_wijst.sc$predicted.celltype.l2.score
+```
+
+```{r, fig.height=4, fig.width=12}
+ggplot(seurat_wijst@meta.data, aes(x = as.character(sample), fill=predicted.celltype.l2))+
+  geom_bar(position = "fill")+
+  theme_classic()+
+  theme(
+    panel.grid=element_blank(),
+    legend.text=element_text(size=10),
+    text = element_text(size=12),
+    legend.title = element_blank(),
+    axis.title.x = element_blank()
+  )+  
+  ylab("% of cells")+
+  scale_fill_manual(values = color_clusters)+ 
+  RotatedAxis() 
+```
+
+```{r}
+DimPlot(object = seurat_wijst,
+        reduction = 'umap',
+        label = FALSE,
+        shuffle = T,
+        group.by = "predicted.celltype.l2")
+```
+
+#--- 
+
+## Monocytes
+
+```{r}
+seurat_wijst_Mono <- subset(seurat_wijst, subset= predicted.celltype.l2 %in% c("CD14 Mono"))
+seurat_wijst_Mono
+```
+
+#### Sub clustering of monocytes
+```{r}
+## Define variable genes
+seurat_wijst_Mono <- FindVariableFeatures(object = seurat_wijst_Mono,
+                             assay="RNA",
+                             selection.method = 'vst')
+
+## Scaling
+seurat_wijst_Mono <- ScaleData(object = seurat_wijst_Mono, assay = "RNA")
+
+## PCA
+seurat_wijst_Mono <- RunPCA(object = seurat_wijst_Mono, features = VariableFeatures(object = seurat_wijst_Mono), 
+                                   verbose = FALSE,
+                                   assay="RNA")
+
+## UMAP
+seurat_wijst_Mono <- RunUMAP(seurat_wijst_Mono, reduction.use = "pca", dims = 1:20, seed.use = 42)
+```
+
+
+```{r, fig.width= 7, fig.height= 6}
+DimPlot(object = seurat_wijst_Mono,
+        reduction = 'umap',
+        group.by="disease_severity",
+        label = TRUE) + scale_color_manual(values=color_clusters) + NoLegend()
+```
+
+```{r, fig.width=16,fig.height=20}
+seurat_wijst_Mono <- FindNeighbors(object = seurat_wijst_Mono, dims = 1:10, reduction="pca", force.recalc = TRUE)
+```
+
+```{r}
+seurat_wijst_Mono <- FindClusters(object = seurat_wijst_Mono, resolution = 0.2, algorithm = 1)
+```
+
+```{r, fig.width= 7, fig.height= 6}
+DimPlot(object = seurat_wijst_Mono,
+        reduction = 'umap',
+        group.by="RNA_snn_res.0.2",
+        label = TRUE) + scale_color_manual(values=color_clusters) + NoLegend()
+```
+
+### Identify cluster marker genes
+
+```{r}
+Idents(seurat_wijst_Mono) <- "RNA_snn_res.0.2"
+seurat_wijst_Mono_cluster.markers.wilcox_res.0.2 <- FindAllMarkers(object = seurat_wijst_Mono,
+                                                                    only.pos = TRUE,
+                                                                    min.pct = 0.2,
+                                                                    logfc.threshold = 0.2,
+                                                                    min.diff.pct = 0.1,
+                                                                    test.use = "wilcox"
+)
+```
+
+##### Dotplot
+
+```{r, fig.width=8, fig.height=12}
+top <- seurat_wijst_Mono_cluster.markers.wilcox_res.0.2 %>% group_by(cluster) %>% top_n(n = 10, wt = abs(avg_log2FC))
+
+p <- DotPlot(seurat_wijst_Mono,
+        group.by = "RNA_snn_res.0.2",
+        features =c("CD14", unique(top$gene)))+
+  scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(n =100, name = "RdBu")))+
+  theme(axis.title = element_blank()) + theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_flip()
+
+p
+```
+
+### Filter Monocyte/T cell cluster
+```{r}
+seurat_wijst_Mono_filt <- subset(seurat_wijst_Mono, subset = RNA_snn_res.0.2 == "4", invert=TRUE)
+table(seurat_wijst_Mono_filt$RNA_snn_res.0.2)
+```
+
+### Save monocyte seurat object
+
+```{r}
+# SaveH5Seurat(
+#   object= seurat_wijst_Mono_filt,
+#   file= paste("seurat_wijst_Mono_filt_",Sys.Date(),sep=""))
+
+# seurat_wijst_Mono_filt <- LoadH5Seurat("seurat_objects/seurat_wijst_Mono_filt_2022-12-20.h5seurat")
+```
+
+#---
+#---
+
+## Merge Monocytes from Su et al., Cell 2020, van der Wijst, STM 2021, Georg et al., Cell 2021 and Sawitzki data
+
+```{r}
+seurat_georg_Mono_filt$disease_stage <- seurat_georg_Mono_filt$phase_full
+seurat_georg_Mono_filt$disease_stage <- ifelse(seurat_georg_Mono_filt$disease_severity=="control", "control", seurat_georg_Mono_filt$disease_stage)
+
+seurat_georg_tmp <- subset(seurat_georg_Mono_filt,
+                           subset=disease_severity %in% c("control",
+                                                          "1-3",
+                                                          "4-5",
+                                                          "6-8",
+                                                          "7-8_anti-IFN")&
+                             disease_stage %in% c("control",
+                                                  "acute",
+                                                  "acute_early",
+                                                  "acute_late",
+                                                  "unknown"))
+```
+
+```{r}
+table(seurat_georg_tmp$disease_severity,seurat_georg_tmp$disease_stage)
+```
+
+
+```{r}
+seurat_wijst_mono_counts <- GetAssayData(seurat_wijst_Mono_filt, assay="RNA", slot = "counts")
+seurat_wijst_mono_counts <- seurat_wijst_mono_counts[!rowSums(seurat_wijst_mono_counts)==0,]
+
+seurat_Sawitzki_mono_counts <- GetAssayData(seurat_Sawitzki_Mono_filt, assay="RNA", slot = "counts")
+seurat_Sawitzki_mono_counts <- seurat_Sawitzki_mono_counts[!rowSums(seurat_Sawitzki_mono_counts)==0,]
+
+seurat_georg_mono_counts <- GetAssayData(seurat_georg_tmp, assay="RNA", slot = "counts")
+seurat_georg_mono_counts <- seurat_georg_mono_counts[!rowSums(seurat_georg_mono_counts)==0,]
+
+seurat_su_mono_counts <- GetAssayData(seurat_su_Mono_filt, assay="RNA", slot = "counts")
+seurat_su_mono_counts <- seurat_su_mono_counts[!rowSums(seurat_su_mono_counts)==0,]
+```
+
+```{r}
+intersect_genes <- as.character(Reduce(intersect,list("wijst"=seurat_wijst_mono_counts@Dimnames[[1]],
+                                                      "Sawitzki"=seurat_Sawitzki_mono_counts@Dimnames[[1]],
+                                                      "georg"=seurat_georg_mono_counts@Dimnames[[1]],
+                                                      "Su"=seurat_su_mono_counts@Dimnames[[1]])))
+length(intersect_genes)
+```
+
+
+```{r}
+seurat_wijst_Mono_filt[["RNAfilt"]] <- CreateAssayObject(counts = seurat_wijst_mono_counts[seurat_wijst_mono_counts@Dimnames[[1]] %in% intersect_genes,])
+DefaultAssay(seurat_wijst_Mono_filt) <- "RNAfilt"
+
+seurat_Sawitzki_Mono_filt[["RNAfilt"]] <- CreateAssayObject(counts = seurat_Sawitzki_mono_counts[seurat_Sawitzki_mono_counts@Dimnames[[1]] %in% intersect_genes,])
+DefaultAssay(seurat_Sawitzki_Mono_filt) <- "RNAfilt"
+
+seurat_georg_tmp[["RNAfilt"]] <- CreateAssayObject(counts = seurat_georg_mono_counts[seurat_georg_mono_counts@Dimnames[[1]] %in% intersect_genes,])
+DefaultAssay(seurat_georg_tmp) <- "RNAfilt"
+
+seurat_su_Mono_filt[["RNAfilt"]] <- CreateAssayObject(counts = seurat_su_mono_counts[seurat_su_mono_counts@Dimnames[[1]] %in% intersect_genes,])
+DefaultAssay(seurat_su_Mono_filt) <- "RNAfilt"
+```
+
+```{r}
+length(Reduce(intersect,list("wijst"=rownames(seurat_wijst_Mono_filt),
+                             "Sawitzki"=rownames(seurat_Sawitzki_Mono_filt),
+                             "georg"=rownames(seurat_georg_tmp),
+                             "su"=rownames(seurat_su_Mono_filt))))
+```
+
+
+```{r}
+seurat_wijst_Mono_filt$dataset <- "Wijst"
+seurat_georg_tmp$dataset <- "Georg"
+seurat_su_Mono_filt$dataset <- "Su"
+seurat_Sawitzki_Mono_filt$dataset <- "Sawitzki"
+```
+
+```{r}
+seurat_mono_merge <- merge(x=seurat_wijst_Mono_filt,
+                           y=list(seurat_georg_tmp,
+                                  seurat_Sawitzki_Mono_filt,
+                                  seurat_su_Mono_filt))
+
+seurat_mono_merge
+```
+
+
+```{r}
+seurat_mono_merge@assays$RNA <- NULL
+seurat_mono_merge@assays$HTO <- NULL
+seurat_mono_merge@assays$integrated <- NULL
+seurat_mono_merge@assays$AB <- NULL
+
+seurat_mono_merge
+```
+
+```{r}
+seurat_mono_merge$disease_stage <- ifelse(seurat_mono_merge$disease_stage == "acute_early", "early",
+                                          ifelse(seurat_mono_merge$disease_stage == "acute_late", "late",
+                                                 ifelse(seurat_mono_merge$disease_stage == "very late", "late",
+                                                        seurat_mono_merge$disease_stage)))
+```
+
+```{r}
+sum(is.na(seurat_mono_merge$disease_stage))
+sum(is.na(seurat_mono_merge$disease_severity))
+```
+
+```{r}
+table(seurat_mono_merge$dataset,seurat_mono_merge$disease_severity)
+table(seurat_mono_merge$disease_severity,seurat_mono_merge$disease_stage)
+```
+
+
+```{r}
+tmp <- unique(seurat_mono_merge@meta.data[,c("sample", "disease_severity","dataset")])
+
+length(unique(seurat_mono_merge$sample))
+
+table(tmp$disease_severity)
+table(tmp$disease_severity, tmp$dataset)
+```
+
+### Combined Analysis
+
+```{r, fig.height=6, fig.width=8}
+## Normalization
+seurat_mono_merge <- NormalizeData(object = seurat_mono_merge, normalization.method = "LogNormalize", scale.factor = 1e4)
+
+## Define variable genes
+seurat_mono_merge <- FindVariableFeatures(object = seurat_mono_merge,
+                             assay="RNAfilt",
+                             selection.method = 'vst')
+
+## Scaling
+seurat_mono_merge <- ScaleData(object = seurat_mono_merge, assay = "RNAfilt")
+
+## PCA
+seurat_mono_merge <- RunPCA(object = seurat_mono_merge, features = VariableFeatures(object = seurat_mono_merge), verbose = FALSE)
+
+## UMAP
+seurat_mono_merge <- RunUMAP(seurat_mono_merge, reduction.use = "pca", dims = 1:20, seed.use = 42)
+
+seurat_mono_merge$dataset <- factor(seurat_mono_merge$dataset, levels=c("Wijst", "Georg","Su", "Sawitzki"))
+
+DimPlot(object = seurat_mono_merge,
+        reduction = 'umap',
+        label = FALSE,order=TRUE,
+        group.by = "dataset")+
+  scale_color_manual(values=c("Wijst"="#dd5129",
+                              "Georg"="#0f7ba2",
+                              "Su"="#B86092",
+                              "Sawitzki"="#43b284"))
+```
+
+
+```{r}
+DimPlot(object = seurat_mono_merge,
+        reduction = 'umap',
+        label = FALSE,order=TRUE,
+        group.by = "disease_severity")+ scale_color_manual(values= c("control"="#4f4d4c",
+                                                                     "1-3" = "#ffb867",
+                                                                     "4-5"="#5D63A1",
+                                                                     "6-8"="#982326",
+                                                                     "7-8_anti-IFN"="#DA2746")) 
+```
+
+```{r}
+SaveH5Seurat(
+  object= seurat_mono_merge,
+  file= paste("seurat_objects/seurat_mono_merge_",Sys.Date(),sep=""))
+
+# seurat_mono_merge <- LoadH5Seurat("seurat_objects/seurat_mono_merge_2023-01-12.h5seurat")
+```
+
+```{r}
+seurat_mono_merge$dataset <- ifelse(seurat_mono_merge$dataset %in% c("RECAST","RECAST_new"),"Sawitzki",as.character(seurat_mono_merge$dataset))
+```
+
+
+
+### Marker Gene Expression (Suppl. Fig. 3B, bottom panel)
+
+```{r, fig.width=18,fig.height=9}
+seurat_mono_merge$disease_severity <- factor(seurat_mono_merge$disease_severity,levels=c("control",
+                                                                                         "1-3",
+                                                                                         "4-5",
+                                                                                         "6-8",
+                                                                                         "7-8_anti-IFN"))
+
+p <- FeatureBoxPlot(seu=seurat_mono_merge,
+                    by = "features", 
+                    assay = "RNAfilt", 
+                    slot = "data", 
+                    exprs.function = "mean",
+                    features = c("HLA-DRA","HLA-DRB1","ISG15", "IFIT2", "CD83", "CCL4", "TNF"), 
+                    meta.include = c("disease_severity","disease_stage"), 
+                    group_by = "disease_severity", 
+                    shape_by = "disease_stage", 
+                    each.pt = "sample", 
+                    custom_fill_colors = c("control"="#4f4d4c",
+                                           "1-3" = "#ffb867",
+                                           "4-5"="#5D63A1",
+                                           "6-8"="#982326",
+                                           "7-8_anti-IFN"="#DA2746"
+                    ),
+                    color_by = "disease_severity", 
+                    comparisons = list(c("1-3", "6-8"),
+                                       c("1-3", "7-8_anti-IFN"),
+                                       c("4-5", "6-8")), 
+                    ncol = 7, 
+                    label = "p.format", 
+                    select.idents = NULL, 
+                    label.x = NA, pt.size = NA, facet.face = "bold.italic") + 
+  ggtitle("Combined Data., Monocytes RNA expression")+
+  theme(plot.title = element_text(size=12))+scale_shape_manual(values = c("control"=15,
+                                                                          "early"=19,
+                                                                          "late"=17,
+                                                                          "unknown"=5))
+
+p
+```
+
+### Monocyte GSVA (Suppl. Figure 3C)
+
+```{r}
+expr_mtx <- AggregateExpression(
+  object= seurat_mono_merge,
+  assays = "RNAfilt",
+  features = NULL,
+  return.seurat = FALSE,
+  group.by = "sample",
+  slot = "data"
+)
+expr_mtx <- as.matrix(expr_mtx$RNA)
+
+rSum<-rowSums(expr_mtx)
+keep<-names(rSum[rSum>50])
+expr_mtx <- expr_mtx[row.names(expr_mtx) %in% keep,]
+str(expr_mtx)
+
+gsva.res <- as.data.frame(t(gsva(expr = expr_mtx, 
+                gset.idx.list = list_compressedIFN[c("IFN","Amplified","DoubleTrigger")], 
+                method = "gsva",
+                verbose=FALSE)))
+
+gsva.res$sampleID <- rownames(gsva.res)
+
+
+gsva.res.melt <- reshape2::melt(gsva.res)
+str(gsva.res.melt)
+```
+
+```{r}
+meta <- unique(seurat_mono_merge@meta.data[,c("sample","disease_severity","disease_stage","dataset")])
+idx <- match(gsva.res.melt$sampleID, meta$sample)
+gsva.res.melt$disease_severity <- meta$disease_severity[idx]
+gsva.res.melt$disease_stage <- meta$disease_stage[idx]
+gsva.res.melt$dataset <- meta$dataset[idx]
+
+gsva.res.melt$disease_severity <- factor(gsva.res.melt$disease_severity, levels=c("control",
+                                                                                  "1-3",
+                                                                                  "4-5",
+                                                                                  "6-8",
+                                                                                  "7-8_anti-IFN"))
+```
+
+
+```{r, fig.width=8,fig.height=4}
+p <- ggplot(gsva.res.melt, aes(y =value, x = disease_severity)) +
+  geom_boxplot(outlier.colour = NA) +
+  geom_point(size = 2, position = position_jitter(width = 0.25),
+             aes(x = disease_severity, y = value, color = disease_severity, shape=disease_stage)) +
+  facet_wrap(vars(variable), scales = "free_y", ncol = 3)+
+  labs(color = "COVID19 severity", shape = "disease_stage")+
+  scale_color_manual(values=c("control"="#4f4d4c",
+                              "1-3" = "#ffb867",
+                              "4-5"="#5D63A1",
+                              "6-8"="#982326",
+                              "7-8_anti-IFN"="#DA2746"
+                              ))+
+  ggpubr::stat_compare_means(mapping = aes_string(group_by), comparisons = list(c("1-3", "4-5"),
+                                                                                c("1-3", "6-8"),
+                                                                                c("1-3", "7-8_anti-IFN"),
+                                                                                c("4-5", "6-8"),
+                                                                                c("4-5", "7-8_anti-IFN"),
+                                                                                c("6-8", "7-8_anti-IFN")),
+                                                                                label = "p.format", method = "wilcox",hide.ns = TRUE) +
+  theme_classic()+theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  scale_shape_manual(values = c("control"=15,
+                                "early"=19,
+                                "late"=17,
+                                "unknown"=5))
+
+p
+```
+
+# --------------------------------------------------------
+# --------------------------------------------------------
+
 # Analysis of additional validation data sets
 
 #---
 
-# Arunachalam et al.
+# Arunachalam et al. (Suppl. Fig 3A)
 
 https://science.sciencemag.org/content/369/6508/1210
 https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE155673
@@ -2106,7 +3960,7 @@ p
 
 #-----------------------------------------------------------------------
 
-# Chua et al., Lung tissue data
+# Chua et al., Lung tissue data (Suppl. Fig 3F)
 
 downloaded from https://doi.org/10.6084/m9.figshare.12436517
 
@@ -2274,7 +4128,7 @@ gg
 
 #----------------------------------------------------------------------
 
-# Bernardes et al. 2020, Immunity
+# Bernardes et al. 2020, Immunity (Suppl. Fig 3D/E)
 
 https://www.sciencedirect.com/science/article/pii/S1074761320305045?via%3Dihub 
 
@@ -2289,7 +4143,7 @@ head(seurat_bernardes@meta.data)
 
 ```{r}
 # load Kiel metadata
-meta_Kiel <- read.csv("/home/jonas/data/analysis/analysis_revision_200616/Kiel_data/Clinicaldata_scRNAseq_kiel.csv", sep = ";")
+meta_Kiel <- read.csv("bernardes_2020/Clinicaldata_scRNAseq_kiel.csv", sep = ";")
 meta_Kiel_sub <- meta_Kiel[,c("orig.ident", "TimepointFromOnset")]
 
 # change Kiel annotation to our groups
@@ -2493,13 +4347,18 @@ gg
 SaveH5Seurat(
   object= seurat_schulte_cohort2_CD8_filtVarFeatures,
   file= paste("seurat_objects/Seurat_Schulte-Schrepping_Rhapsody_CD8T_",Sys.Date(),sep=""))
+
+# seurat_schulte_cohort2_CD8_filtVarFeatures <- LoadH5Seurat("seurat_objects/Seurat_Schulte-Schrepping_Rhapsody_CD8T_2022-08-17.h5seurat")
 ```
 
 ```{r}
 SaveH5Seurat(
   object= seurat_schulte_cohort2_Mono,
   file= paste("seurat_objects/Seurat_Schulte-Schrepping_Rhapsody_CD14Mono_",Sys.Date(),sep=""))
+
+# seurat_schulte_cohort2_Mono <- LoadH5Seurat("seurat_objects/Seurat_Schulte-Schrepping_Rhapsody_CD14Mono_2022-08-17.h5seurat")
 ```
+
 ```{r}
 SaveH5Seurat(
   object= seurat_schulte_cohort2_mDC,
@@ -2524,6 +4383,8 @@ SaveH5Seurat(
   file= paste("seurat_objects/Seurat_Bernardes_CD8T_",Sys.Date(),sep=""))
 ```
 
+#--- 
+# Session Info
 
 ```{r}
 sessionInfo()
