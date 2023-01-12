@@ -613,27 +613,6 @@ DimPlot(object = seurat_schulte_cohort2_pbmc,
   scale_color_manual(values = color_clusters)
 ```
 
-### AUCell rankings
-
-Build cell ranking
-```{r}
-# tmp1 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,1:40000])
-# tmp2 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,40001:80000])
-# tmp3 <- as.matrix(seurat_schulte_cohort2_pbmc@assays$RNA@data[,80001:ncol(seurat_schulte_cohort2_pbmc@assays$RNA@data)])
-# 
-# tmp <- do.call(cbind,list(tmp1, tmp2,tmp3))
-# 
-# rSum<-rowSums(tmp)
-# keep<-names(rSum[rSum>10])
-# tmp <- tmp[row.names(tmp) %in% keep,]
-# cells_rankings <- AUCell_buildRankings(as.matrix(tmp), verbose = TRUE, nCores=2)
-# save(cells_rankings, file = "analysis_output/20230111_aucell_ranking_schulte_cohort2_PBMC.Robj")
-```
-
-```{r}
-load("analysis_output/20230111_aucell_ranking_schulte_cohort2_PBMC.Robj")
-```
-
 #-------------------------------------------------------------------------------
 
 # CD8+ T cell analysis
@@ -4076,7 +4055,7 @@ cells_rankings_chua <- AUCell_buildRankings(as.matrix(tmp), verbose = TRUE, nCor
 # Calculate AUC scores
 cells_AUC_Tcell_chua <- AUCell_calcAUC(Tcell_sig_list, 
                                        cells_rankings_chua, 
-                                       aucMaxRank = ceiling(0.03 * nrow(cells_rankings)), 
+                                       aucMaxRank = ceiling(0.03 * nrow(cells_rankings_chua)), 
                                        normAUC = T)
 ```
 
@@ -4288,7 +4267,7 @@ cells_rankings_bernardes_CD8 <- AUCell_buildRankings(as.matrix(tmp), verbose = T
 # Calculate AUC scores
 cells_AUC_CD8_bernardes <- AUCell_calcAUC(Tcell_sig_list, 
                                   cells_rankings_bernardes_CD8, 
-                                  aucMaxRank = ceiling(0.03 * nrow(cells_rankings)), 
+                                  aucMaxRank = ceiling(0.03 * nrow(cells_rankings_chua)), 
                                   normAUC = T)
 ```
 
