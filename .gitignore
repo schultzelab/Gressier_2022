@@ -1,0 +1,3 @@
+# exclude all large seurat objects and analysis output files:
+scRNAseq_analyses/seurat_objects/*
+scRNAseq_analyses/analysis_output/*
